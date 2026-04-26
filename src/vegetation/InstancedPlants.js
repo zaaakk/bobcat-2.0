@@ -49,10 +49,9 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uTierMax: { value: 0 },
     uFadeIn: { value: 12 },
     uFadeOut: { value: 30 },
-    uFogNear: { value: 600.0 },
-    uFogMid: { value: 4000.0 },
-    uFogFar: { value: 18000.0 },
-    uFogColorNear: { value: new THREE.Color('#bcc7d4') },
+    uFogDensity:   { value: 0.00012 },
+    uFogColorLow:  { value: new THREE.Color('#bcc7d4') },
+    uFogColorMid:  { value: new THREE.Color('#7a9dc6') },
     uFogColorFar:  { value: new THREE.Color('#4373b3') },
     uTime: { value: 0 }
   };
@@ -279,8 +278,8 @@ const FRAG = /* glsl */`
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
   uniform vec3 uAmbient;
-  uniform float uFogNear, uFogMid, uFogFar;
-  uniform vec3 uFogColorNear, uFogColorFar;
+  uniform float uFogDensity;
+  uniform vec3 uFogColorLow, uFogColorMid, uFogColorFar;
   varying vec2 vAtlasUv;
   varying float vFade;
   varying vec3 vWorldPos;
@@ -296,12 +295,16 @@ const FRAG = /* glsl */`
     float topLight = clamp(uSunDir.y, 0.0, 1.0);
     vec3 lit = tex.rgb * (uSunColor * (0.4 + 0.6 * topLight) + uAmbient * 0.7);
 
-    // Aerial perspective (matches terrain).
+    // Aerial perspective — same model as the terrain.
     float dist = length(cameraPosition - vWorldPos);
-    float fNear = smoothstep(uFogNear, uFogMid, dist);
-    float fFar  = smoothstep(uFogMid, uFogFar, dist);
-    vec3 fogCol = mix(uFogColorNear, uFogColorFar, fFar);
-    lit = mix(lit, fogCol, fNear * 0.4 + fFar * 0.6);
+    float fog = 1.0 - exp(-dist * uFogDensity);
+    float fogStage = smoothstep(0.35, 0.85, fog);
+    vec3 fogCol = mix(
+      mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
+      uFogColorFar,
+      fogStage
+    );
+    lit = mix(lit, fogCol, fog);
 
     gl_FragColor = vec4(lit, 1.0);
   }

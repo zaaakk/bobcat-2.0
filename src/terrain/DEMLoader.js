@@ -132,13 +132,16 @@ export function sampleHeight(dem, x, z) {
 }
 
 /**
- * Sample the height that the *rendered terrain mesh* shows at (x, z).
+ * Sample the height the *rendered terrain mesh* actually draws at (x, z).
  *
- * The mesh has a fixed grid of vertices at `vertexSpacing` apart. Each vertex's
- * y is a bilinear sample of the DEM heightmap. Between vertices, the rasterizer
- * linearly interpolates those vertex y values — which is *smoother* than a
- * direct bilinear of the DEM. Plants placed at `sampleHeight` would float or
- * sink relative to the rendered ground; this sampler matches what the eye sees.
+ * The mesh's vertices are a regular grid; the rasterizer interpolates each
+ * triangle's three vertices linearly (NOT bilinearly across the quad). Three's
+ * PlaneGeometry triangulates with the V01↔V10 diagonal:
+ *   • below diagonal (fx + fy < 1): V00, V01, V10
+ *   • above diagonal (fx + fy ≥ 1): V01, V11, V10
+ *
+ * Bilinear sampling disagrees with this by tens of cm on slopes — enough that
+ * placed plants and the bobcat appear to float above (or sink into) the ground.
  */
 export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
   const halfPlane = planeSize * 0.5;
@@ -146,21 +149,55 @@ export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
   const gx = (x + halfPlane) / dx;
   const gy = (z + halfPlane) / dx;
   const ix0 = Math.floor(gx), iy0 = Math.floor(gy);
-  const ix1 = ix0 + 1, iy1 = iy0 + 1;
   const fx = gx - ix0, fy = gy - iy0;
-
-  // Vertex world coordinates → bilinear-from-DEM sampling.
   const x0w = ix0 * dx - halfPlane;
-  const x1w = ix1 * dx - halfPlane;
+  const x1w = (ix0 + 1) * dx - halfPlane;
   const y0w = iy0 * dx - halfPlane;
-  const y1w = iy1 * dx - halfPlane;
+  const y1w = (iy0 + 1) * dx - halfPlane;
   const h00 = sampleHeight(dem, x0w, y0w);
   const h10 = sampleHeight(dem, x1w, y0w);
   const h01 = sampleHeight(dem, x0w, y1w);
   const h11 = sampleHeight(dem, x1w, y1w);
-  const h0 = h00 * (1 - fx) + h10 * fx;
-  const h1 = h01 * (1 - fx) + h11 * fx;
-  return h0 * (1 - fy) + h1 * fy;
+  // Each vertex's rendered Y also includes the procedural mesoscale detail
+  // (the shader adds it on top of the heightmap sample).
+  const d00 = terrainDetail(x0w, y0w);
+  const d10 = terrainDetail(x1w, y0w);
+  const d01 = terrainDetail(x0w, y1w);
+  const d11 = terrainDetail(x1w, y1w);
+  const v00 = h00 + d00, v10 = h10 + d10, v01 = h01 + d01, v11 = h11 + d11;
+  if (fx + fy < 1) {
+    return (1 - fx - fy) * v00 + fy * v01 + fx * v10;
+  }
+  return (1 - fx) * v01 + (fx + fy - 1) * v11 + (1 - fy) * v10;
+}
+
+/**
+ * Mesoscale detail noise — must MATCH the GLSL `terrainDetail` in TerrainMesh.js
+ * exactly, otherwise plants and the bobcat float above (or sink into) the
+ * visible bumps that the shader adds to the rasterised geometry.
+ */
+function hash2(x, y) {
+  return frac(Math.sin(x * 127.1 + y * 311.7) * 43758.5453);
+}
+function frac(v) { return v - Math.floor(v); }
+function valueNoise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const a = hash2(ix, iy);
+  const b = hash2(ix + 1, iy);
+  const c = hash2(ix, iy + 1);
+  const d = hash2(ix + 1, iy + 1);
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  return (a * (1 - ux) + b * ux) * (1 - uy) + (c * (1 - ux) + d * ux) * uy;
+}
+export function terrainDetail(x, z) {
+  let n = 0, a = 0.55, f = 0.10;
+  for (let k = 0; k < 4; k++) {
+    n += a * (valueNoise(x * f, z * f) - 0.5);
+    f *= 2.13; a *= 0.55;
+  }
+  return n * 1.6;
 }
 
 export function sampleSlope(dem, x, z, step = 4) {

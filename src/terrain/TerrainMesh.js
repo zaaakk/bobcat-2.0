@@ -32,11 +32,11 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
     uSunColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
     uAmbientColor: { value: new THREE.Color(0.42, 0.45, 0.55) },
-    uFogNear: { value: 600.0 },
-    uFogMid: { value: 4000.0 },
-    uFogFar: { value: 18000.0 },
-    uFogColorNear: { value: new THREE.Color('#bcc7d4') },
-    uFogColorFar:  { value: new THREE.Color('#4373b3') }
+    uFogDensity: { value: 0.00012 },     // 1/metres — exponential fog rate
+    uFogColorLow:  { value: new THREE.Color('#bcc7d4') },
+    uFogColorMid:  { value: new THREE.Color('#7a9dc6') },
+    uFogColorFar:  { value: new THREE.Color('#4373b3') },
+    uHorizonAlt:   { value: 1200.0 }     // metres above which sky tint dominates
   };
 
   const material = new THREE.ShaderMaterial({
@@ -59,6 +59,29 @@ const VERT = /* glsl */`
   uniform vec2 uDemSize;
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
+
+  // Hash + value-noise from Inigo Quilez. Cheap and tile-free.
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float noise2(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+  }
+  // Mesoscale terrain detail: fractal brownian motion over (worldXZ).
+  // Returns metres of displacement, peak ≈ 0.9 m at ~3-12 m wavelength.
+  float terrainDetail(vec2 worldXZ) {
+    float n = 0.0;
+    float a = 0.55, f = 0.10;
+    for (int k = 0; k < 4; k++) {
+      n += a * (noise2(worldXZ * f) - 0.5);
+      f *= 2.13; a *= 0.55;
+    }
+    return n * 1.6;
+  }
   varying vec3 vWorldPos;
   varying vec2 vUv;
   varying vec2 vDemUv;
@@ -91,6 +114,10 @@ const VERT = /* glsl */`
 
     float h = sampleH(worldXZ);
     h = mix(h, h - 80.0, edgeFade);
+    // Add a small mesoscale displacement so the terrain doesn't read as flat
+    // angled planes between vertices. Fades out near the DEM edge so we don't
+    // amplify edge-fade discontinuities.
+    h += terrainDetail(worldXZ) * (1.0 - edgeFade);
     p.y = h;
 
     // Per-vertex normal computed from heightmap sampled at mesh-vertex spacing —
@@ -100,10 +127,11 @@ const VERT = /* glsl */`
     // show up as lighting seams.
     float dx = uMeshSpacing.x;
     float dz = uMeshSpacing.y;
-    float hL = sampleHEdge(worldXZ - vec2(dx, 0.0));
-    float hR = sampleHEdge(worldXZ + vec2(dx, 0.0));
-    float hD = sampleHEdge(worldXZ - vec2(0.0, dz));
-    float hU = sampleHEdge(worldXZ + vec2(0.0, dz));
+    float detailFade = 1.0 - edgeFade;
+    float hL = sampleHEdge(worldXZ - vec2(dx, 0.0)) + terrainDetail(worldXZ - vec2(dx, 0.0)) * detailFade;
+    float hR = sampleHEdge(worldXZ + vec2(dx, 0.0)) + terrainDetail(worldXZ + vec2(dx, 0.0)) * detailFade;
+    float hD = sampleHEdge(worldXZ - vec2(0.0, dz)) + terrainDetail(worldXZ - vec2(0.0, dz)) * detailFade;
+    float hU = sampleHEdge(worldXZ + vec2(0.0, dz)) + terrainDetail(worldXZ + vec2(0.0, dz)) * detailFade;
     vec3 tx = vec3(2.0 * dx, hR - hL, 0.0);
     vec3 tz = vec3(0.0, hU - hD, 2.0 * dz);
     vMeshNormal = normalize(cross(tz, tx));
@@ -129,8 +157,9 @@ const FRAG = /* glsl */`
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
   uniform vec3 uAmbientColor;
-  uniform float uFogNear, uFogMid, uFogFar;
-  uniform vec3 uFogColorNear, uFogColorFar;
+  uniform float uFogDensity;
+  uniform float uHorizonAlt;
+  uniform vec3 uFogColorLow, uFogColorMid, uFogColorFar;
   varying vec3 vWorldPos;
   varying vec2 vUv;
   varying vec2 vDemUv;
@@ -157,20 +186,33 @@ const FRAG = /* glsl */`
     // by default. This is a small tint, not a desaturation.
     albedo *= vec3(0.95, 0.97, 1.02);
 
-    // Detail normal — small perturbation on top of the smooth mesh normal.
+    // Detail normal — small perturbation, distance-faded so the repeating tile
+    // pattern doesn't make obvious bands at glancing angles.
+    float detailDist = length(cameraPosition - vWorldPos);
+    float detailAmt = 0.18 * (1.0 - smoothstep(40.0, 220.0, detailDist));
     vec3 detail = texture2D(uNormal, tileUv * 0.5).rgb * 2.0 - 1.0;
     detail.y = abs(detail.y);
-    vec3 n = normalize(vMeshNormal + detail * 0.35);
+    vec3 n = normalize(vMeshNormal + detail * detailAmt);
 
     float NdotL = clamp(dot(n, uSunDir), 0.0, 1.0);
     vec3 lit = albedo * (uSunColor * NdotL + uAmbientColor);
 
-    // Aerial perspective.
+    // Aerial perspective: exponential extinction with two-stage colour mix.
+    // Closer haze is a desaturated cool grey, deep distance is rayleigh-blue.
+    // The mid colour gives the curve an inflection so terrain doesn't go from
+    // tan straight to deep blue in one step.
     float dist = length(cameraPosition - vWorldPos);
-    float fNear = smoothstep(uFogNear, uFogMid, dist);
-    float fFar  = smoothstep(uFogMid, uFogFar, dist);
-    vec3 fogCol = mix(uFogColorNear, uFogColorFar, fFar);
-    lit = mix(lit, fogCol, fNear * 0.35 + fFar * 0.65);
+    float fog = 1.0 - exp(-dist * uFogDensity);            // 0..1
+    float fogStage = smoothstep(0.35, 0.85, fog);          // late-stage bias
+    vec3 fogCol = mix(
+      mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
+      uFogColorFar,
+      fogStage
+    );
+    // Slight altitude tint — high terrain reads cooler/bluer because more air column.
+    float altT = smoothstep(0.0, uHorizonAlt, vWorldPos.y - cameraPosition.y + 800.0);
+    fogCol = mix(fogCol, uFogColorFar, altT * 0.15);
+    lit = mix(lit, fogCol, fog);
 
     gl_FragColor = vec4(lit, 1.0);
   }

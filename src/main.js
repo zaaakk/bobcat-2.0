@@ -55,15 +55,19 @@ async function main() {
 
   setLoadingProgress(0.40, 'Painting ground…');
   const heightTex = heightmapTexture(THREE, dem);
-  const splatTex = generateSplatMap(dem, 768);
+  const splatTex = generateSplatMap(dem, 1280);
 
   // ---------- ground textures ----------
   const texLoader = new THREE.TextureLoader();
+  const maxAniso = renderer.capabilities.getMaxAnisotropy?.() || 8;
   function loadTex(url) {
     return new Promise((res, rej) => texLoader.load(url, t => {
-      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      // Mirrored-repeat: each tile is flipped at the seam, so the texture's
+      // own edges meet themselves and there are no bright wrap lines even
+      // when the source PNGs aren't authored to be tileable.
+      t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping;
       t.colorSpace = THREE.SRGBColorSpace;
-      t.anisotropy = 8;
+      t.anisotropy = maxAniso;
       res(t);
     }, undefined, rej));
   }
@@ -76,10 +80,8 @@ async function main() {
   ]);
 
   setLoadingProgress(0.55, 'Building terrain mesh…');
-  // Vertex spacing should be close to the DEM pixel size (~16.5 m) so plants
-  // and the bobcat sit on the same surface the rasterizer draws.
-  const terrainSegments = 1024;
-  const terrainEdgePadding = 7000;
+  const terrainSegments = 1536;
+  const terrainEdgePadding = 6000;
   const terrainPlaneSize = dem.worldWidth + terrainEdgePadding * 2;
   const terrain = createTerrainMesh({
     dem, heightTex, splatTex,
@@ -100,10 +102,10 @@ async function main() {
   const instances = placeVegetation({
     dem,
     groundY,
-    cellSize: 5.0,
-    globalDensity: 1.2,
+    cellSize: 4.0,
+    globalDensity: 1.0,
     playRadius: 3500,
-    maxInstances: 700_000
+    maxInstances: 1_000_000
   });
   console.log(`placed ${instances.count} plant instances`);
 
