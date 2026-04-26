@@ -71,7 +71,7 @@ function buildController(gltf) {
     yaw: 0,
     speed: 0,
     walkSpeed: 3.2,
-    runSpeed: 7.4,
+    runSpeed: 14.8,
     mixer,
     actions,
     setGroundFn(fn) { groundFn = fn; }
@@ -105,29 +105,7 @@ function buildController(gltf) {
     state.position.z = Math.max(-halfH, Math.min(halfH, state.position.z));
 
     state.position.y = groundFn(state.position.x, state.position.z);
-
-    // Sample the ground at four points around the bobcat's footprint and build
-    // an orientation from the slope. The yaw direction (sin, 0, cos) plus the
-    // terrain normal give us a full basis without any gimbal-y axis math.
-    const fp = 0.45; // footprint half-length / half-width in metres
-    const sY = Math.sin(state.yaw), cY = Math.cos(state.yaw);
-    const fxw = state.position.x + sY * fp, fzw = state.position.z + cY * fp;
-    const bxw = state.position.x - sY * fp, bzw = state.position.z - cY * fp;
-    const rxw = state.position.x + cY * fp, rzw = state.position.z - sY * fp;
-    const lxw = state.position.x - cY * fp, lzw = state.position.z + sY * fp;
-    const hFront = groundFn(fxw, fzw), hBack = groundFn(bxw, bzw);
-    const hRight = groundFn(rxw, rzw), hLeft = groundFn(lxw, lzw);
-    tmpFwd.set(sY * 2 * fp, hFront - hBack, cY * 2 * fp).normalize();
-    tmpRight.set(cY * 2 * fp, hRight - hLeft, -sY * 2 * fp).normalize();
-    tmpUp.crossVectors(tmpFwd, tmpRight).normalize();
-    if (tmpUp.y < 0) tmpUp.negate();
-    // Re-orthogonalise: project yaw forward onto the plane perpendicular to up.
-    tmpFwdYaw.set(sY, 0, cY);
-    tmpFwd.copy(tmpFwdYaw).addScaledVector(tmpUp, -tmpUp.dot(tmpFwdYaw)).normalize();
-    tmpRight.crossVectors(tmpUp, tmpFwd).normalize();
-    tmpBasis.makeBasis(tmpRight, tmpUp, tmpFwd);
-    tmpQuat.setFromRotationMatrix(tmpBasis);
-    pivot.quaternion.slerp(tmpQuat, Math.min(1, dt * 14));
+    pivot.rotation.set(0, state.yaw, 0);
 
     if (mixer) mixer.update(dt);
     else {

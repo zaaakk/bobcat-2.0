@@ -112,6 +112,12 @@ async function main() {
   const plants = createInstancedPlants({ atlas, instances, dem });
   for (const tier of plants.tiers) scene.add(tier.mesh);
 
+  // Debug toggles for headless probing.
+  const sp = new URLSearchParams(window.location.search);
+  if (sp.has('noplants')) for (const t of plants.tiers) t.mesh.visible = false;
+  if (sp.has('noterrain')) terrain.mesh.visible = false;
+  if (sp.has('nocat')) setTimeout(() => bobcat.object.visible = false, 100);
+
   // ---------- player ----------
   setLoadingProgress(0.88, 'Waking bobcat…');
   const bobcat = await loadBobcat({
