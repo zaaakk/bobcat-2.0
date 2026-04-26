@@ -152,9 +152,10 @@ async function main() {
   scene.add(ambient);
 
   // A small "lantern" point light that hovers above the bobcat. Off during the
-  // day; fades on at dusk and stays on through the night so the player has a
-  // local pool of warm light tracking with them.
-  const lantern = new THREE.PointLight(0xffd9a8, 0, 18, 1.4);
+  // day; fades on at dusk and stays on through the night. Cool silvery
+  // moonlight tone (not warm), so the local pool reads as wisp/spirit-light
+  // rather than a campfire.
+  const lantern = new THREE.PointLight(0xb8d2ff, 0, 22, 1.3);
   lantern.castShadow = false;
   scene.add(lantern);
 

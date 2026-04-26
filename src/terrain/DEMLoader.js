@@ -141,14 +141,16 @@ export function sampleHeight(dem, x, z) {
 /**
  * Sample the height the *rendered terrain mesh* actually draws at (x, z).
  *
- * The mesh's vertices are a regular grid; the rasterizer interpolates each
- * triangle's three vertices linearly (NOT bilinearly across the quad). Three's
- * PlaneGeometry triangulates with the V01↔V10 diagonal:
- *   • below diagonal (fx + fy < 1): V00, V01, V10
- *   • above diagonal (fx + fy ≥ 1): V01, V11, V10
+ * Three's PlaneGeometry actually triangulates with the SW↔NE diagonal (the
+ * indices are pushed as `[a, b, d]` and `[b, c, d]` where a=NW, b=SW, c=SE,
+ * d=NE in world space — the shared edge is b↔d). In our (fx, fy) where
+ * fx = world-x fraction and fy = world-z fraction inside the quad, that
+ * diagonal is V00↔V11 (line fx = fy):
+ *   • south-east half (fx > fy): V00, V10, V11
+ *   • north-west half (fy > fx): V00, V01, V11
  *
- * Bilinear sampling disagrees with this by tens of cm on slopes — enough that
- * placed plants and the bobcat appear to float above (or sink into) the ground.
+ * Earlier code used the V01↔V10 diagonal — wrong half of the quad on slopes,
+ * which is why plants and the bobcat were still floating/sinking on hills.
  */
 export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
   const halfPlane = planeSize * 0.5;
@@ -172,10 +174,14 @@ export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
   const d01 = terrainDetail(x0w, y1w);
   const d11 = terrainDetail(x1w, y1w);
   const v00 = h00 + d00, v10 = h10 + d10, v01 = h01 + d01, v11 = h11 + d11;
-  if (fx + fy < 1) {
-    return (1 - fx - fy) * v00 + fy * v01 + fx * v10;
+  if (fx > fy) {
+    // South-east triangle (V00, V10, V11):
+    //   barycentric: α=1−fx, β=fx−fy, γ=fy
+    return (1 - fx) * v00 + (fx - fy) * v10 + fy * v11;
   }
-  return (1 - fx) * v01 + (fx + fy - 1) * v11 + (1 - fy) * v10;
+  // North-west triangle (V00, V01, V11):
+  //   barycentric: α=1−fy, β=fy−fx, γ=fx
+  return (1 - fy) * v00 + (fy - fx) * v01 + fx * v11;
 }
 
 /**

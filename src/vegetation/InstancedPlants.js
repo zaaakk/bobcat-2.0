@@ -55,7 +55,7 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uFogColorFar:  { value: new THREE.Color('#668db8') },
     uExposure:     { value: 1.18 },
     uLanternPos:   { value: new THREE.Vector3() },
-    uLanternColor: { value: new THREE.Color(1.0, 0.85, 0.66) },
+    uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
     uLanternIntensity: { value: 0.0 },
     uTime: { value: 0 }

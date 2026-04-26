@@ -66,12 +66,15 @@ export const SPECIES = [
     atlasIndex: 3,
     height: [0.8, 1.5],
     aspect: 1.1,
-    densityScale: 1.5,
-    // Big patches — large clumps with sharp boundaries
-    clumpSeed: 0.59, clumpFreq: 0.0006, clumpSharpness: 2.6, clumpFloor: 0.04,
+    densityScale: 3.6,
+    // Big patches — broad clump field with high contrast inside the patch.
+    // Inside an accepted cell, drop a small cluster of pads at varying radii.
+    clumpSeed: 0.59, clumpFreq: 0.0007, clumpSharpness: 2.4, clumpFloor: 0.10,
+    clusterCount: [3, 7],
+    clusterRadius: [0.4, 2.4],
     suitability: (slopeT, elevT, drainage) =>
-      HABITAT.smooth(0.20, 0.0, slopeT) * (0.6 + 0.4 * (1 - drainage)) *
-      HABITAT.smooth(0.0, 0.7, 1 - elevT)
+      HABITAT.smooth(0.22, 0.0, slopeT) * (0.6 + 0.4 * (1 - drainage)) *
+      HABITAT.smooth(0.0, 0.8, 1 - elevT)
   },
   {
     id: 4,

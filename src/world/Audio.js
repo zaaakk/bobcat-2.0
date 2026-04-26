@@ -105,19 +105,18 @@ export function createAudio() {
     if (!c) return null;
 
     // Dry desert wind: white-noise base, mid frequencies notched out so it
-    // doesn't read as ocean churn. A high-shelf cut and a low-pass at 1.6 kHz
-    // give the airy, dusty character; one slow LFO modulates a single voice
-    // so gusts are gentle, not breathy. Quiet by default — this is bed, not
-    // foreground.
+    // doesn't read as ocean churn.
     const src = c.createBufferSource();
     src.buffer = noiseBuffer(12.0, 'white');
     src.loop = true;
 
-    const overall = c.createGain();
-    overall.gain.value = 0.10;            // ← much quieter than before
-    overall.connect(busGain);
+    // The OUTER gain holds the on/off envelope (long stretches of silence
+    // alternating with audible gusts). The INNER 'voice' gain hosts the slow
+    // amplitude LFO so within each "on" stretch the wind still breathes.
+    const outer = c.createGain();
+    outer.gain.value = 0.0;
+    outer.connect(busGain);
 
-    // Cut the muddy low-mids that made it feel like surf.
     const hp = c.createBiquadFilter();
     hp.type = 'highpass'; hp.frequency.value = 350; hp.Q.value = 0.5;
     const notch = c.createBiquadFilter();
@@ -127,18 +126,36 @@ export function createAudio() {
 
     const voice = c.createGain();
     voice.gain.value = 0.55;
-    src.connect(hp).connect(notch).connect(lp).connect(voice).connect(overall);
+    src.connect(hp).connect(notch).connect(lp).connect(voice).connect(outer);
 
-    // One unhurried gust LFO — not three layered ones.
+    // Slow gust LFO (when wind is on).
     const lfo = c.createOscillator();
     lfo.frequency.value = 0.07;
     const lfoGain = c.createGain();
     lfoGain.gain.value = 0.18;
     lfo.connect(lfoGain).connect(voice.gain);
     lfo.start();
-
     src.start();
-    return { src, overall };
+
+    // Long-form on/off scheduler: pick a random "on" stretch (15–45 s) and
+    // "off" stretch (10–30 s), fade in and out smoothly between them.
+    function scheduleNext(now) {
+      const onDur  = 15 + Math.random() * 30;
+      const offDur = 10 + Math.random() * 20;
+      const fadeIn  = 2.0 + Math.random() * 2.0;
+      const fadeOut = 3.0 + Math.random() * 3.0;
+      const target = 0.10;
+      outer.gain.cancelScheduledValues(now);
+      outer.gain.setValueAtTime(outer.gain.value, now);
+      outer.gain.linearRampToValueAtTime(target, now + fadeIn);
+      outer.gain.linearRampToValueAtTime(target, now + onDur - fadeOut);
+      outer.gain.linearRampToValueAtTime(0.0, now + onDur);
+      const total = onDur + offDur;
+      setTimeout(() => scheduleNext(c.currentTime), total * 1000);
+    }
+    scheduleNext(c.currentTime + 0.5);
+
+    return { src, outer };
   }
 
   function startCricketLayer(busGain, baseFreq, rateHz) {
@@ -200,11 +217,28 @@ export function createAudio() {
 
     // Wind bed: real file if present, else synth bed.
     if (wind) {
+      // Real wind file — apply the same on/off scheduler so even the
+      // dropped-in recording fades out for 10-30 s stretches and back in.
       const src = ctx.createBufferSource();
       src.buffer = wind; src.loop = true;
-      const g = ctx.createGain(); g.gain.value = 0.16;   // bed-volume, not foreground
-      src.connect(g).connect(master);
+      const outer = ctx.createGain();
+      outer.gain.value = 0;
+      src.connect(outer).connect(master);
       src.start();
+      const peakLevel = 0.16;
+      function scheduleNext(now) {
+        const onDur  = 15 + Math.random() * 30;
+        const offDur = 10 + Math.random() * 20;
+        const fadeIn  = 2.0 + Math.random() * 2.0;
+        const fadeOut = 3.0 + Math.random() * 3.0;
+        outer.gain.cancelScheduledValues(now);
+        outer.gain.setValueAtTime(outer.gain.value, now);
+        outer.gain.linearRampToValueAtTime(peakLevel, now + fadeIn);
+        outer.gain.linearRampToValueAtTime(peakLevel, now + onDur - fadeOut);
+        outer.gain.linearRampToValueAtTime(0.0, now + onDur);
+        setTimeout(() => scheduleNext(ctx.currentTime), (onDur + offDur) * 1000);
+      }
+      scheduleNext(ctx.currentTime + 0.5);
     } else {
       startWindBed(master);
     }
