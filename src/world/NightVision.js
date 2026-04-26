@@ -34,9 +34,11 @@ export function createNightVision(renderer) {
     uLensCenter: { value: new THREE.Vector2(0.5, 0.5) },
     uLensRadius: { value: 0.22 }, // fraction of min(screen w, h)
     uLensFeather: { value: 0.10 }, // soft edge
-    uSaturation: { value: 1.0 },   // user grade (1 = no change)
-    uBrightness: { value: 1.0 },   // user grade (1 = no change)
-    uContrast: { value: 1.0 }      // user grade (1 = no change)
+    // Defaults dialled in via the debug menu — slightly desaturated, lifted,
+    // and softened to take the edge off without losing the texture character.
+    uSaturation: { value: 0.9 },
+    uBrightness: { value: 1.1 },
+    uContrast: { value: 0.9 }
   };
 
   const mat = new THREE.ShaderMaterial({

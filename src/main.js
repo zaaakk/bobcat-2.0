@@ -171,9 +171,9 @@ async function main() {
             onInput: v => nightVision.uniforms.uContrast.value = v
           });
           panelButton(el, 'Reset', () => {
-            nightVision.uniforms.uSaturation.value = 1.0;
-            nightVision.uniforms.uBrightness.value = 1.0;
-            nightVision.uniforms.uContrast.value = 1.0;
+            nightVision.uniforms.uSaturation.value = 0.9;
+            nightVision.uniforms.uBrightness.value = 1.1;
+            nightVision.uniforms.uContrast.value = 0.9;
             // Re-render the panel so the slider thumbs jump back.
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
