@@ -53,6 +53,7 @@ function buildController(gltf) {
   }
 
   let groundFn = (x, z) => 0;
+  let gaitClock = 0;
 
   const state = {
     object: pivot,
@@ -102,8 +103,17 @@ function buildController(gltf) {
 
     if (mixer) mixer.update(dt);
     else {
-      const t = performance.now() * 0.001;
-      root.position.y = footY + Math.sin(t * 6) * 0.01 * (state.speed > 0.1 ? 1.6 : 0.4);
+      // Procedural gait: the GLB is one rigid mesh, so we animate the whole
+      // body. Speed drives gait frequency; idle gets a slow chest-rise breath.
+      const speedT = Math.min(1, state.speed / state.runSpeed);
+      const gaitFreq = THREE.MathUtils.lerp(2.0, 12.0, speedT); // breath → gallop
+      const gaitPhase = (gaitClock += dt * gaitFreq);
+      const bob   = Math.sin(gaitPhase) * THREE.MathUtils.lerp(0.005, 0.07, speedT);
+      const pitch = Math.sin(gaitPhase) * THREE.MathUtils.lerp(0.0,  0.10, speedT);
+      const roll  = Math.sin(gaitPhase * 0.5) * speedT * 0.06;
+      root.position.y = footY + bob;
+      root.rotation.x = pitch;
+      root.rotation.z = roll;
     }
   }
 
