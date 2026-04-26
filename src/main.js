@@ -8,6 +8,9 @@ import { buildSpriteAtlas } from './vegetation/SpriteAtlas.js';
 import { placeVegetation } from './vegetation/PlacementEngine.js';
 import { createInstancedPlants } from './vegetation/InstancedPlants.js';
 import { SPECIES } from './vegetation/species.js';
+import { loadBobcat } from './player/Bobcat.js';
+import { createThirdPersonCamera } from './player/Camera.js';
+import { createInput } from './player/Input.js';
 
 main().catch(err => {
   console.error(err);
@@ -49,9 +52,9 @@ async function main() {
 
   setProgress(0.05, 'Loading terrain…');
   const dem = await loadDEM('/assets/dem/terrarium.png', '/assets/dem/terrarium.json',
-    t => setProgress(0.05 + t * 0.25, 'Loading terrain…'));
+    t => setProgress(0.05 + t * 0.20, 'Loading terrain…'));
 
-  setProgress(0.32, 'Painting ground…');
+  setProgress(0.30, 'Painting ground…');
   const heightTex = heightmapTexture(THREE, dem);
   const splatTex = generateSplatMap(dem, 768);
 
@@ -72,7 +75,7 @@ async function main() {
     loadTex('/assets/ground/normal.png')
   ]);
 
-  setProgress(0.55, 'Building terrain mesh…');
+  setProgress(0.50, 'Building terrain mesh…');
   const terrain = createTerrainMesh({
     dem, heightTex, splatTex,
     groundTextures: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
@@ -82,10 +85,10 @@ async function main() {
   });
   scene.add(terrain.mesh);
 
-  setProgress(0.65, 'Loading flora…');
+  setProgress(0.60, 'Loading flora…');
   const atlas = await buildSpriteAtlas(SPECIES, 512);
 
-  setProgress(0.80, 'Placing vegetation…');
+  setProgress(0.72, 'Placing vegetation…');
   const instances = placeVegetation({
     dem,
     cellSize: 7.0,
@@ -98,11 +101,28 @@ async function main() {
   const plants = createInstancedPlants({ atlas, instances, dem });
   for (const tier of plants.tiers) scene.add(tier.mesh);
 
+  setProgress(0.85, 'Waking bobcat…');
+  const bobcat = await loadBobcat({
+    onProgress: t => setProgress(0.85 + t * 0.13, 'Waking bobcat…')
+  });
+  bobcat.position.set(0, sampleHeight(dem, 0, 0), 0);
+  bobcat.yaw = 0;
+  bobcat.pivot.rotation.y = 0;
+  scene.add(bobcat.object);
+
+  const cam = createThirdPersonCamera({ camera, target: bobcat, dem, domElement: renderer.domElement });
+  const input = createInput();
+
+  // Lights — terrain/plants self-light in shaders; these light the GLB bobcat.
+  const sun = new THREE.DirectionalLight(0xfff0d6, 2.6);
+  sun.position.set(500, 850, 200);
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(0xb6c8e0, 0x6a5a3e, 0.7));
+  scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+
   setProgress(1.0, 'Ready');
   hideLoading();
 
-  // Idle camera orbit until player input is wired in.
-  const center = new THREE.Vector3(0, sampleHeight(dem, 0, 0) + 1.5, 0);
   const clock = new THREE.Clock();
   let last = performance.now();
   function frame() {
@@ -110,8 +130,11 @@ async function main() {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     const t = clock.getElapsedTime();
-    camera.position.set(Math.sin(t * 0.05) * 30, center.y + 8, Math.cos(t * 0.05) * 30);
-    camera.lookAt(center);
+
+    const inputs = input.sample(cam.yaw);
+    bobcat.update(dt, inputs, dem);
+    cam.update(dt);
+
     plants.update(t, camera.position);
     renderer.render(scene, camera);
     requestAnimationFrame(frame);
