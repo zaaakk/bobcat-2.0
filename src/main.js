@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { loadDEM, heightmapTexture, sampleHeight, sampleRenderedHeight } from './terrain/DEMLoader.js';
+import { loadDEM, heightmapTexture, sampleRenderedHeight, sampleSlope } from './terrain/DEMLoader.js';
 import { generateSplatMap } from './terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from './terrain/TerrainMesh.js';
 
@@ -45,7 +45,7 @@ async function main() {
   });
 
   // ---------- sky ----------
-  createSky(scene);
+  const sky = createSky(scene);
 
   // ---------- DEM ----------
   setLoadingProgress(0.05, 'Loading terrain…');
@@ -80,7 +80,7 @@ async function main() {
   ]);
 
   setLoadingProgress(0.55, 'Building terrain mesh…');
-  const terrainSegments = 1536;
+  const terrainSegments = 1280;
   const terrainEdgePadding = 6000;
   const terrainPlaneSize = dem.worldWidth + terrainEdgePadding * 2;
   const terrain = createTerrainMesh({
@@ -123,14 +123,15 @@ async function main() {
   const bobcat = await loadBobcat({
     onProgress: t => setLoadingProgress(0.88 + t * 0.10, 'Waking bobcat…')
   });
-  // Spawn at DEM centre, on the ground.
-  bobcat.position.set(0, groundY(0, 0), 0);
-  bobcat.yaw = 0;
-  bobcat.pivot.rotation.y = 0;
+  const spawn = chooseSpawnPoint(dem, groundY);
+  bobcat.position.set(spawn.x, spawn.y, spawn.z);
+  bobcat.yaw = spawn.yaw;
+  bobcat.pivot.rotation.y = spawn.yaw;
   scene.add(bobcat.object);
 
   bobcat.setGroundFn(groundY);
   const cam = createThirdPersonCamera({ camera, target: bobcat, groundY, domElement: renderer.domElement });
+  cam.state.yaw = bobcat.yaw + Math.PI;
   const input = createInput();
 
   const hud = createHUD({ dem });
@@ -148,26 +149,37 @@ async function main() {
   scene.add(hemi);
   const ambient = new THREE.AmbientLight(0xffffff, 0.25);
   scene.add(ambient);
+  const environment = createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient });
+  environment.update(0);
 
   // ---------- render loop ----------
   const clock = new THREE.Clock();
   let last = performance.now();
   let fpsAccum = 0, fpsFrames = 0;
   let qualityLevel = 1; // 1 = full, can drop to 0.85
+  let displayFps = 60;
 
   function frame() {
     const now = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     const t = clock.getElapsedTime();
+    const instantFps = 1 / Math.max(dt, 1e-3);
+    displayFps = THREE.MathUtils.lerp(displayFps, instantFps, 0.12);
 
     const inputs = input.sample(cam.yaw);
     bobcat.update(dt, inputs, dem);
     cam.update(dt);
 
+    // Keep the sky sphere centred on the camera so its direction-based shading
+    // doesn't drift when the player walks far from origin (otherwise the sun
+    // disk and horizon haze peel away from the camera's actual view).
+    sky.mesh.position.copy(camera.position);
+
+    environment.update(t);
     plants.update(t, camera.position);
 
-    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position });
+    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps });
     if (typeof window !== 'undefined') {
       window.__bobcatPos = {
         bobcat: { x: bobcat.position.x, y: bobcat.position.y, z: bobcat.position.z, yaw: bobcat.yaw },
@@ -194,4 +206,153 @@ async function main() {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+}
+
+function chooseSpawnPoint(dem, groundY, maxRadius = 2800) {
+  // Constrain to a circle so the bobcat always spawns inside the vegetation
+  // zone. (The plant placer uses a finite playRadius around origin — spawning
+  // far outside leaves the bobcat in a bare wasteland with no plants anywhere.)
+  let fallback = { x: 0, y: groundY(0, 0), z: 0, yaw: Math.random() * Math.PI * 2 };
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < 28; i++) {
+    const r = Math.sqrt(Math.random()) * maxRadius;
+    const a = Math.random() * Math.PI * 2;
+    const x = Math.cos(a) * r;
+    const z = Math.sin(a) * r;
+    const y = groundY(x, z);
+    const slope = sampleSlope(dem, x, z, 4);
+    const edge = maxRadius - r;
+    const score = edge - slope * 1400;
+    if (score > bestScore) {
+      bestScore = score;
+      fallback = { x, y, z, yaw: Math.random() * Math.PI * 2 };
+    }
+    if (slope < 0.32 && r < maxRadius - 80) {
+      return { x, y, z, yaw: Math.random() * Math.PI * 2 };
+    }
+  }
+  return fallback;
+}
+
+function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient }) {
+  const cycleSeconds = 240;
+  const phaseOffset = 0.18;
+  const palette = {
+    skyTopDay:    new THREE.Color('#4f9ee0'),
+    skyTopNight:  new THREE.Color('#1c2a44'),  // moonlit, not pitch black
+    skyTopDusk:   new THREE.Color('#36547f'),
+    horizonDay:   new THREE.Color('#d6d8d2'),
+    horizonNight: new THREE.Color('#2a3b54'),
+    hazeDay:      new THREE.Color('#e6d8c7'),
+    hazeNight:    new THREE.Color('#384c69'),
+    hazeDusk:     new THREE.Color('#ef9c67'),
+    fogLowDay:    new THREE.Color('#c9d1d8'),
+    fogLowNight:  new THREE.Color('#3a4a64'),
+    fogMidDay:    new THREE.Color('#96abc1'),
+    fogMidNight:  new THREE.Color('#3f546f'),
+    fogFarDay:    new THREE.Color('#668db8'),
+    fogFarNight:  new THREE.Color('#28395a'),
+    sunDay:       new THREE.Color('#fff0d1'),
+    sunDusk:      new THREE.Color('#ff9a63'),
+    sunNight:     new THREE.Color('#a3b6d8'),  // cool moonlight (used as the moon's glow)
+    terrainAmbientDay:   new THREE.Color('#6b7486'),
+    terrainAmbientNight: new THREE.Color('#3b4760'),  // moonlit ambient
+    plantAmbientDay:     new THREE.Color('#68758a'),
+    plantAmbientNight:   new THREE.Color('#3a4660'),
+    hemiSkyDay:   new THREE.Color('#a8c4df'),
+    hemiSkyNight: new THREE.Color('#4a5c80'),
+    hemiGroundDay:new THREE.Color('#756042'),
+    hemiGroundNight:new THREE.Color('#262a36'),
+    ambientDay:   new THREE.Color('#ffffff'),
+    ambientNight: new THREE.Color('#a8b8d6')
+  };
+
+  const state = {
+    sunDir: new THREE.Vector3(),
+    skyTop: new THREE.Color(),
+    horizon: new THREE.Color(),
+    haze: new THREE.Color(),
+    fogLow: new THREE.Color(),
+    fogMid: new THREE.Color(),
+    fogFar: new THREE.Color(),
+    sunColor: new THREE.Color(),
+    terrainAmbient: new THREE.Color(),
+    plantAmbient: new THREE.Color(),
+    hemiSky: new THREE.Color(),
+    hemiGround: new THREE.Color(),
+    ambient: new THREE.Color()
+  };
+
+  function update(timeSec) {
+    const cycle = (timeSec / cycleSeconds + phaseOffset) % 1;
+    const theta = cycle * Math.PI * 2;
+    state.sunDir.set(Math.cos(theta) * 0.28, Math.sin(theta), Math.sin(theta) * 0.96).normalize();
+
+    const daylight = THREE.MathUtils.smoothstep(state.sunDir.y, -0.14, 0.10);
+    const night = 1.0 - THREE.MathUtils.smoothstep(state.sunDir.y, -0.24, 0.02);
+    const twilightBand = THREE.MathUtils.smoothstep(state.sunDir.y, -0.22, 0.16) *
+      (1.0 - THREE.MathUtils.smoothstep(Math.abs(state.sunDir.y), 0.16, 0.58));
+
+    state.skyTop.lerpColors(palette.skyTopNight, palette.skyTopDay, daylight);
+    state.skyTop.lerp(palette.skyTopDusk, twilightBand * 0.55);
+    state.horizon.lerpColors(palette.horizonNight, palette.horizonDay, daylight);
+    state.haze.lerpColors(palette.hazeNight, palette.hazeDay, daylight);
+    state.haze.lerp(palette.hazeDusk, twilightBand * 0.9);
+    state.fogLow.lerpColors(palette.fogLowNight, palette.fogLowDay, daylight);
+    state.fogMid.lerpColors(palette.fogMidNight, palette.fogMidDay, daylight);
+    state.fogFar.lerpColors(palette.fogFarNight, palette.fogFarDay, daylight);
+    state.sunColor.lerpColors(palette.sunNight, palette.sunDay, daylight);
+    state.sunColor.lerp(palette.sunDusk, twilightBand * 0.85);
+    state.terrainAmbient.lerpColors(palette.terrainAmbientNight, palette.terrainAmbientDay, daylight);
+    state.plantAmbient.lerpColors(palette.plantAmbientNight, palette.plantAmbientDay, daylight);
+    state.hemiSky.lerpColors(palette.hemiSkyNight, palette.hemiSkyDay, daylight);
+    state.hemiGround.lerpColors(palette.hemiGroundNight, palette.hemiGroundDay, daylight);
+    state.ambient.lerpColors(palette.ambientNight, palette.ambientDay, daylight);
+
+    sky.material.uniforms.uTopColor.value.copy(state.skyTop);
+    sky.material.uniforms.uHorizonColor.value.copy(state.horizon);
+    sky.material.uniforms.uHazeColor.value.copy(state.haze);
+    sky.material.uniforms.uSunDir.value.copy(state.sunDir);
+    sky.material.uniforms.uSunColor.value.copy(state.sunColor);
+
+    terrain.uniforms.uSunDir.value.copy(state.sunDir);
+    terrain.uniforms.uSunColor.value.copy(state.sunColor);
+    terrain.uniforms.uAmbientColor.value.copy(state.terrainAmbient);
+    terrain.uniforms.uFogColorLow.value.copy(state.fogLow);
+    terrain.uniforms.uFogColorMid.value.copy(state.fogMid);
+    terrain.uniforms.uFogColorFar.value.copy(state.fogFar);
+    terrain.uniforms.uFogDensity.value = THREE.MathUtils.lerp(0.00008, 0.00018, daylight) + twilightBand * 0.00003;
+
+    for (const tier of plants.tiers) {
+      tier.uniforms.uSunDir.value.copy(state.sunDir);
+      tier.uniforms.uSunColor.value.copy(state.sunColor);
+      tier.uniforms.uAmbient.value.copy(state.plantAmbient);
+      tier.uniforms.uFogColorLow.value.copy(state.fogLow);
+      tier.uniforms.uFogColorMid.value.copy(state.fogMid);
+      tier.uniforms.uFogColorFar.value.copy(state.fogFar);
+      tier.uniforms.uFogDensity.value = terrain.uniforms.uFogDensity.value;
+    }
+
+    const direct = Math.max(0, state.sunDir.y);
+    // At night, the sunlight direction is repurposed as moonlight — opposite
+    // hemisphere of the sky, dim, cool.
+    if (state.sunDir.y < 0) {
+      sun.position.set(-state.sunDir.x, -state.sunDir.y, -state.sunDir.z).multiplyScalar(1800);
+    } else {
+      sun.position.copy(state.sunDir).multiplyScalar(1800);
+    }
+    sun.color.copy(state.sunColor);
+    // Direct sun by day, weak silvery moon by night (kicks in below the horizon).
+    const moonStrength = Math.max(0, -state.sunDir.y);
+    sun.intensity = Math.pow(direct, 0.42) * 2.8 + twilightBand * 0.18 + moonStrength * 0.55;
+    hemi.color.copy(state.hemiSky);
+    hemi.groundColor.copy(state.hemiGround);
+    hemi.intensity = THREE.MathUtils.lerp(0.42, 0.72, daylight) + twilightBand * 0.08;
+    ambient.color.copy(state.ambient);
+    ambient.intensity = THREE.MathUtils.lerp(0.18, 0.26, daylight) + night * 0.04;
+    renderer.toneMappingExposure = THREE.MathUtils.lerp(0.78, 1.06, daylight) + twilightBand * 0.04;
+  }
+
+  return { update };
 }

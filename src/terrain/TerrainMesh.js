@@ -32,10 +32,10 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
     uSunColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
     uAmbientColor: { value: new THREE.Color(0.42, 0.45, 0.55) },
-    uFogDensity: { value: 0.00012 },     // 1/metres — exponential fog rate
-    uFogColorLow:  { value: new THREE.Color('#bcc7d4') },
-    uFogColorMid:  { value: new THREE.Color('#7a9dc6') },
-    uFogColorFar:  { value: new THREE.Color('#4373b3') },
+    uFogDensity: { value: 0.00017 },     // 1/metres — base extinction rate
+    uFogColorLow:  { value: new THREE.Color('#c9d1d8') },
+    uFogColorMid:  { value: new THREE.Color('#96abc1') },
+    uFogColorFar:  { value: new THREE.Color('#668db8') },
     uHorizonAlt:   { value: 1200.0 }     // metres above which sky tint dominates
   };
 
@@ -60,8 +60,9 @@ const VERT = /* glsl */`
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
 
-  // Hash + value-noise from Inigo Quilez. Cheap and tile-free.
-  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  // Hash + value-noise. The constant offset moves the singular "0 at integer (0,0)"
+  // away from world origin so the bobcat's spawn isn't on a noise discontinuity.
+  float hash(vec2 p) { return fract(sin(dot(p + vec2(11.31, 5.97), vec2(127.1, 311.7))) * 43758.5453); }
   float noise2(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     float a = hash(i);
@@ -201,14 +202,22 @@ const FRAG = /* glsl */`
     // Closer haze is a desaturated cool grey, deep distance is rayleigh-blue.
     // The mid colour gives the curve an inflection so terrain doesn't go from
     // tan straight to deep blue in one step.
+    vec3 viewRay = normalize(vWorldPos - cameraPosition);
     float dist = length(cameraPosition - vWorldPos);
-    float fog = 1.0 - exp(-dist * uFogDensity);            // 0..1
-    float fogStage = smoothstep(0.35, 0.85, fog);          // late-stage bias
+    // Denser extinction near the horizon and lower in the air column makes the
+    // desert distance read less like linear screen fog and more like dust haze.
+    float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
+    float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
+    float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
+    float fog = 1.0 - exp(-dist * uFogDensity * densityBoost); // 0..1
+    float fogStage = smoothstep(0.28, 0.82, fog);              // late-stage bias
     vec3 fogCol = mix(
       mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
       uFogColorFar,
       fogStage
     );
+    float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
+    fogCol += uSunColor * sunScatter * horizon * fog * 0.22;
     // Slight altitude tint — high terrain reads cooler/bluer because more air column.
     float altT = smoothstep(0.0, uHorizonAlt, vWorldPos.y - cameraPosition.y + 800.0);
     fogCol = mix(fogCol, uFogColorFar, altT * 0.15);

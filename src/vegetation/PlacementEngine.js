@@ -36,8 +36,9 @@ export function placeVegetation({
   const r2 = playRadius * playRadius;
 
   const elevRange = Math.max(1, dem.maxZ - dem.minZ);
+  const maxClusterMul = Math.max(...SPECIES.map(s => s.clusterCount ? s.clusterCount[1] : 1));
 
-  const bufN = Math.min(maxInstances, cols * rows);
+  const bufN = Math.min(maxInstances, cols * rows * maxClusterMul);
   const positions = new Float32Array(bufN * 3);
   const scales    = new Float32Array(bufN);
   const rotations = new Float32Array(bufN);
@@ -46,9 +47,30 @@ export function placeVegetation({
 
   const speciesScores = new Array(SPECIES.length);
 
-  for (let j = 0; j < rows; j++) {
-    for (let i = 0; i < cols; i++) {
-      if (n >= bufN) break;
+  // Build a shuffled cell-index list so when the buffer fills, accepted plants
+  // are distributed across the whole play area instead of saturating one
+  // corner. We shuffle deterministically (Fisher-Yates with a fixed PRNG) so
+  // placement is reproducible.
+  const cellOrder = new Int32Array(cols * rows);
+  for (let k = 0; k < cellOrder.length; k++) cellOrder[k] = k;
+  let prngState = 0x9E3779B1;
+  function prngU32() {
+    prngState = ((prngState ^ (prngState << 13)) | 0) >>> 0;
+    prngState = ((prngState ^ (prngState >>> 17)) | 0) >>> 0;
+    prngState = ((prngState ^ (prngState << 5)) | 0) >>> 0;
+    return prngState;
+  }
+  for (let k = cellOrder.length - 1; k > 0; k--) {
+    const swap = prngU32() % (k + 1);
+    const tmp = cellOrder[k]; cellOrder[k] = cellOrder[swap]; cellOrder[swap] = tmp;
+  }
+
+  for (let cellIdx = 0; cellIdx < cellOrder.length; cellIdx++) {
+    if (n >= bufN) break;
+    const flat = cellOrder[cellIdx];
+    const j = (flat / cols) | 0;
+    const i = flat - j * cols;
+    {
 
       const baseX = playOriginX + (i + 0.5) * cellSize;
       const baseZ = playOriginZ + (j + 0.5) * cellSize;
@@ -105,17 +127,36 @@ export function placeVegetation({
       }
 
       const sp = SPECIES[chosen];
-      const sizeRand = ((acceptNoise(i * 0.57, j * 0.61) + 1) * 0.5);
-      const h = sp.height[0] + sizeRand * (sp.height[1] - sp.height[0]);
-      const rot = ((acceptNoise(i * 0.33 + 17.0, j * 0.41 + 19.0) + 1) * Math.PI);
+      const clusterMin = sp.clusterCount ? sp.clusterCount[0] : 1;
+      const clusterMax = sp.clusterCount ? sp.clusterCount[1] : 1;
+      const clusterCount = Math.max(1, Math.round(clusterMin + ((acceptNoise(i * 0.79 + 23.0, j * 0.73 + 29.0) + 1) * 0.5) * (clusterMax - clusterMin)));
 
-      positions[n * 3 + 0] = x;
-      positions[n * 3 + 1] = sampleY(x, z);
-      positions[n * 3 + 2] = z;
-      scales[n] = h;
-      rotations[n] = rot;
-      speciesId[n] = chosen;
-      n++;
+      for (let c = 0; c < clusterCount; c++) {
+        if (n >= bufN) break;
+
+        let px = x;
+        let pz = z;
+        if (c > 0 && sp.clusterRadius) {
+          const ang = ((acceptNoise(i * 0.17 + c * 6.1 + 31.0, j * 0.13 + c * 4.7 + 37.0) + 1) * 0.5) * Math.PI * 2;
+          const radiusT = ((acceptNoise(i * 0.29 + c * 7.3 + 41.0, j * 0.23 + c * 5.9 + 43.0) + 1) * 0.5);
+          const radius = sp.clusterRadius[0] + radiusT * (sp.clusterRadius[1] - sp.clusterRadius[0]);
+          px += Math.cos(ang) * radius;
+          pz += Math.sin(ang) * radius;
+          if (px * px + pz * pz > r2) continue;
+        }
+
+        const sizeRand = ((acceptNoise(i * 0.57 + c * 3.7, j * 0.61 + c * 2.9) + 1) * 0.5);
+        const rot = ((acceptNoise(i * 0.33 + 17.0 + c * 5.3, j * 0.41 + 19.0 + c * 4.1) + 1) * 0.5) * Math.PI * 2;
+        const h = sp.height[0] + sizeRand * (sp.height[1] - sp.height[0]);
+
+        positions[n * 3 + 0] = px;
+        positions[n * 3 + 1] = sampleY(px, pz);
+        positions[n * 3 + 2] = pz;
+        scales[n] = h;
+        rotations[n] = rot;
+        speciesId[n] = chosen;
+        n++;
+      }
     }
   }
 

@@ -49,10 +49,10 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uTierMax: { value: 0 },
     uFadeIn: { value: 12 },
     uFadeOut: { value: 30 },
-    uFogDensity:   { value: 0.00012 },
-    uFogColorLow:  { value: new THREE.Color('#bcc7d4') },
-    uFogColorMid:  { value: new THREE.Color('#7a9dc6') },
-    uFogColorFar:  { value: new THREE.Color('#4373b3') },
+    uFogDensity:   { value: 0.00017 },
+    uFogColorLow:  { value: new THREE.Color('#c9d1d8') },
+    uFogColorMid:  { value: new THREE.Color('#96abc1') },
+    uFogColorFar:  { value: new THREE.Color('#668db8') },
     uTime: { value: 0 }
   };
 
@@ -296,14 +296,20 @@ const FRAG = /* glsl */`
     vec3 lit = tex.rgb * (uSunColor * (0.4 + 0.6 * topLight) + uAmbient * 0.7);
 
     // Aerial perspective — same model as the terrain.
+    vec3 viewRay = normalize(vWorldPos - cameraPosition);
     float dist = length(cameraPosition - vWorldPos);
-    float fog = 1.0 - exp(-dist * uFogDensity);
-    float fogStage = smoothstep(0.35, 0.85, fog);
+    float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
+    float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
+    float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
+    float fog = 1.0 - exp(-dist * uFogDensity * densityBoost);
+    float fogStage = smoothstep(0.28, 0.82, fog);
     vec3 fogCol = mix(
       mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
       uFogColorFar,
       fogStage
     );
+    float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
+    fogCol += uSunColor * sunScatter * horizon * fog * 0.22;
     lit = mix(lit, fogCol, fog);
 
     gl_FragColor = vec4(lit, 1.0);

@@ -80,10 +80,11 @@ export const SPECIES = [
     atlasIndex: 4,
     height: [0.45, 0.85],
     aspect: 1.2,
-    densityScale: 2.4,
-    // Carpets — gentle low-frequency variation, high baseline so it always
-    // appears, plus high-frequency micro-clump for texture inside the carpet
-    clumpSeed: 0.71, clumpFreq: 0.0008, clumpSharpness: 0.8, clumpFloor: 0.45,
+    densityScale: 4.4,
+    // Tight multi-stem clumps instead of a single tuft every few metres.
+    clumpSeed: 0.71, clumpFreq: 0.0046, clumpSharpness: 2.8, clumpFloor: 0.14,
+    clusterCount: [3, 6],
+    clusterRadius: [0.35, 1.15],
     suitability: (slopeT, elevT) =>
       HABITAT.smooth(0.25, 0.0, slopeT) * (0.4 + 0.6 * elevT)
   },

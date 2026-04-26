@@ -7,6 +7,7 @@ export function createHUD({ dem }) {
   const minimapCanvas = document.querySelector('#minimap canvas');
   const minimapCtx = minimapCanvas.getContext('2d');
   const minimapMarker = document.getElementById('minimap-marker');
+  const fpsReadout = document.getElementById('fps-readout');
 
   // Build a 720° compass strip (so the stripe never runs out as you spin).
   // Each character spans 60px in CSS; full rotation = 360 * (60 / 30deg) … we'll
@@ -22,7 +23,7 @@ export function createHUD({ dem }) {
   // Pre-render a static minimap from the DEM (once).
   renderMinimap(minimapCtx, minimapCanvas, dem);
 
-  function update({ playerYaw, playerPos }) {
+  function update({ playerYaw, playerPos, fps }) {
     // Compass: when player faces +Z (yaw=0), 'N' should be centered.
     // Strip is 220px wide. We position so middle index of stripe ('N' in second copy) sits centered minus yaw offset.
     const centerOffset = -((points.length + 4) * 60 - 110); // start centered on second-block 'N'
@@ -33,6 +34,10 @@ export function createHUD({ dem }) {
     const v = 1 - ((playerPos.z / dem.worldHeight) + 0.5);
     minimapMarker.style.left = `${u * 100}%`;
     minimapMarker.style.top  = `${v * 100}%`;
+
+    if (fpsReadout && Number.isFinite(fps)) {
+      fpsReadout.textContent = String(Math.round(fps)).padStart(3, '0');
+    }
   }
 
   return { update };

@@ -89,8 +89,13 @@ function loadImage(src, onProgress) {
  */
 export function heightmapTexture(THREE, dem) {
   const halfData = new Uint16Array(dem.data.length);
+  const renderData = new Float32Array(dem.data.length);
   for (let i = 0; i < dem.data.length; i++) {
-    halfData[i] = THREE.DataUtils.toHalfFloat(dem.data[i]);
+    const h = THREE.DataUtils.toHalfFloat(dem.data[i]);
+    halfData[i] = h;
+    // Mirror the exact R16F quantization on the CPU so object placement and
+    // terrain queries use the same heights the GPU rasterizes.
+    renderData[i] = THREE.DataUtils.fromHalfFloat(h);
   }
   const tex = new THREE.DataTexture(
     halfData, dem.width, dem.height,
@@ -103,6 +108,7 @@ export function heightmapTexture(THREE, dem) {
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
   tex.userData = { heightOffset: 0, heightScale: 1 };
+  dem.renderData = renderData;
   return tex;
 }
 
@@ -114,6 +120,7 @@ export function heightmapTexture(THREE, dem) {
  * terrain on a slope.
  */
 export function sampleHeight(dem, x, z) {
+  const src = dem.renderData || dem.data;
   const u = (x / dem.worldWidth + 0.5) * dem.width - 0.5;
   const v = (z / dem.worldHeight + 0.5) * dem.height - 0.5;
   const x0 = Math.floor(u), y0 = Math.floor(v);
@@ -122,10 +129,10 @@ export function sampleHeight(dem, x, z) {
   const cy0 = Math.max(0, Math.min(dem.height - 1, y0));
   const cx1 = Math.max(0, Math.min(dem.width - 1, x0 + 1));
   const cy1 = Math.max(0, Math.min(dem.height - 1, y0 + 1));
-  const h00 = dem.data[cy0 * dem.width + cx0];
-  const h10 = dem.data[cy0 * dem.width + cx1];
-  const h01 = dem.data[cy1 * dem.width + cx0];
-  const h11 = dem.data[cy1 * dem.width + cx1];
+  const h00 = src[cy0 * dem.width + cx0];
+  const h10 = src[cy0 * dem.width + cx1];
+  const h01 = src[cy1 * dem.width + cx0];
+  const h11 = src[cy1 * dem.width + cx1];
   const h0 = h00 * (1 - fx) + h10 * fx;
   const h1 = h01 * (1 - fx) + h11 * fx;
   return h0 * (1 - fy) + h1 * fy;
@@ -177,7 +184,8 @@ export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
  * visible bumps that the shader adds to the rasterised geometry.
  */
 function hash2(x, y) {
-  return frac(Math.sin(x * 127.1 + y * 311.7) * 43758.5453);
+  // Same offset as the GLSL hash so JS and GPU agree.
+  return frac(Math.sin((x + 11.31) * 127.1 + (y + 5.97) * 311.7) * 43758.5453);
 }
 function frac(v) { return v - Math.floor(v); }
 function valueNoise(x, y) {

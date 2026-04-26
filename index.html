@@ -4,69 +4,141 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Bobcat — Chihuahuan Desert</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Almendra:ital,wght@0,400;0,700;1,400;1,700&family=Lora:ital,wght@0,400..700;1,400..700&family=Syne+Tactile&family=Work+Sans:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
     <style>
-      :root { color-scheme: dark; }
-      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1a1815; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #f1ebd9; }
+      :root {
+        color-scheme: dark;
+        --ui-blue: #000fa4;
+        --ui-red: #b80000;
+        --ui-brown: #4e302a;
+        --ui-ink: #f6f0ea;
+        --ui-panel: color-mix(in srgb, var(--ui-blue) 22%, black);
+        --ui-panel-soft: color-mix(in srgb, var(--ui-brown) 58%, black);
+        --ui-line: color-mix(in srgb, var(--ui-red) 60%, var(--ui-brown));
+      }
+      html, body {
+        margin: 0; padding: 0; height: 100%; overflow: hidden;
+        background: #140c12;
+        font-family: 'Work Sans', sans-serif;
+        color: var(--ui-ink);
+      }
       #app { position: fixed; inset: 0; }
       canvas { display: block; width: 100%; height: 100%; }
 
       #loading {
         position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-        background: radial-gradient(ellipse at center, #2a241a 0%, #100c08 100%);
+        background:
+          radial-gradient(circle at center, rgba(0,15,164,0.28) 0%, rgba(0,15,164,0.06) 26%, transparent 48%),
+          linear-gradient(180deg, #1d1015 0%, #0b0710 100%);
         z-index: 100; transition: opacity 0.6s ease;
       }
       #loading.hidden { opacity: 0; pointer-events: none; }
-      #loading h1 { font-weight: 200; letter-spacing: 0.4em; font-size: 14px; color: #d8c98c; margin: 0 0 24px 0; text-transform: uppercase; }
-      #loading .bar { width: 280px; height: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
-      #loading .bar > div { height: 100%; width: 0%; background: #d8c98c; transition: width 0.25s ease; }
-      #loading .status { margin-top: 12px; font-size: 11px; color: #8a8270; letter-spacing: 0.2em; text-transform: uppercase; }
+      #loading h1 {
+        font-family: 'Almendra', serif; font-weight: 700; letter-spacing: 0.24em; font-size: 24px;
+        color: var(--ui-ink); margin: 0 0 24px 0; text-transform: uppercase;
+        text-shadow: 0 0 18px rgba(0,15,164,0.4);
+      }
+      #loading .bar {
+        width: 300px; height: 8px; background: rgba(255,255,255,0.08); overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--ui-red) 55%, white 12%);
+        box-shadow: inset 0 0 0 1px rgba(0,0,0,0.35);
+      }
+      #loading .bar > div {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, var(--ui-red) 0%, var(--ui-blue) 100%);
+        transition: width 0.25s ease;
+      }
+      #loading .status {
+        margin-top: 12px; font-family: 'Lora', serif; font-size: 12px; color: rgba(246,240,234,0.82);
+        letter-spacing: 0.12em; text-transform: uppercase;
+      }
 
       #hud { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
 
       #compass {
         position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
-        width: 220px; height: 28px; background: rgba(0,0,0,0.35); border-radius: 14px;
+        width: 240px; height: 34px;
+        background: linear-gradient(180deg, rgba(0,15,164,0.55) 0%, rgba(78,48,42,0.72) 100%);
+        border: 1px solid rgba(184,0,0,0.7);
+        border-radius: 17px;
         overflow: hidden; backdrop-filter: blur(6px);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.28);
       }
-      #compass-strip { position: absolute; top: 0; height: 28px; display: flex; align-items: center; color: #f1ebd9; font-size: 11px; letter-spacing: 0.25em; }
+      #compass-strip {
+        position: absolute; top: 0; height: 34px; display: flex; align-items: center;
+        color: var(--ui-ink); font-family: 'Work Sans', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.28em;
+      }
       #compass-strip span { display: inline-block; width: 60px; text-align: center; opacity: 0.85; }
-      #compass-needle { position: absolute; top: 0; left: 50%; width: 1px; height: 28px; background: #d8c98c; box-shadow: 0 0 4px #d8c98c; }
+      #compass-needle {
+        position: absolute; top: 0; left: 50%; width: 2px; height: 34px; background: var(--ui-red);
+        box-shadow: 0 0 10px rgba(184,0,0,0.75);
+      }
 
       #portrait {
         position: absolute; bottom: 22px; left: 22px;
         width: 86px; height: 86px; border-radius: 50%;
-        background: rgba(0,0,0,0.35); border: 2px solid rgba(216,201,140,0.6);
+        background: linear-gradient(180deg, rgba(0,15,164,0.28) 0%, rgba(78,48,42,0.78) 100%);
+        border: 2px solid rgba(184,0,0,0.72);
         overflow: hidden; backdrop-filter: blur(6px);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.32);
       }
       #portrait img { width: 100%; height: 100%; object-fit: cover; filter: saturate(0.85) contrast(1.05); }
       #portrait-name {
         position: absolute; left: 116px; bottom: 38px;
-        font-size: 14px; letter-spacing: 0.25em; color: #f1ebd9; text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+        font-family: 'Almendra', serif; font-size: 20px; letter-spacing: 0.14em; color: var(--ui-ink);
+        text-shadow: 0 1px 2px rgba(0,0,0,0.6);
       }
       #portrait-sub {
         position: absolute; left: 116px; bottom: 22px;
-        font-size: 10px; letter-spacing: 0.3em; color: #d8c98c; text-transform: uppercase;
+        font-family: 'Lora', serif; font-size: 11px; letter-spacing: 0.18em;
+        color: rgba(246,240,234,0.85); text-transform: uppercase;
       }
 
       #minimap {
         position: absolute; bottom: 22px; right: 22px;
         width: 160px; height: 160px; border-radius: 50%;
-        background: rgba(0,0,0,0.35); border: 2px solid rgba(216,201,140,0.6);
+        background: linear-gradient(180deg, rgba(0,15,164,0.3) 0%, rgba(78,48,42,0.78) 100%);
+        border: 2px solid rgba(184,0,0,0.72);
         overflow: hidden; backdrop-filter: blur(6px);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.32);
       }
       #minimap canvas { width: 100%; height: 100%; }
       #minimap-marker {
         position: absolute; top: 50%; left: 50%; width: 8px; height: 8px;
-        background: #ff8a3d; border: 1.5px solid #fff; border-radius: 50%;
+        background: var(--ui-red); border: 1.5px solid var(--ui-ink); border-radius: 50%;
         transform: translate(-50%, -50%);
-        box-shadow: 0 0 6px rgba(255,138,61,0.8);
+        box-shadow: 0 0 8px rgba(184,0,0,0.85);
       }
 
       #help {
-        position: absolute; top: 18px; left: 18px; font-size: 10px; letter-spacing: 0.2em;
-        color: rgba(241,235,217,0.65); text-transform: uppercase; line-height: 1.8;
+        position: absolute; top: 18px; left: 18px;
+        padding: 10px 12px;
+        font-family: 'Lora', serif; font-size: 11px; letter-spacing: 0.12em;
+        color: rgba(246,240,234,0.78); text-transform: uppercase; line-height: 1.8;
+        background: linear-gradient(180deg, rgba(0,15,164,0.36) 0%, rgba(78,48,42,0.7) 100%);
+        border: 1px solid rgba(184,0,0,0.65);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.24);
       }
-      #help b { color: #d8c98c; font-weight: 600; }
+      #help b { color: var(--ui-ink); font-family: 'Work Sans', sans-serif; font-weight: 800; }
+
+      #telemetry {
+        position: absolute; top: 18px; right: 18px;
+        min-width: 92px; padding: 10px 12px;
+        background: linear-gradient(180deg, rgba(0,15,164,0.36) 0%, rgba(78,48,42,0.7) 100%);
+        border: 1px solid rgba(184,0,0,0.65);
+        box-shadow: 0 10px 24px rgba(0,0,0,0.24);
+        text-align: right;
+      }
+      #telemetry-label {
+        font-family: 'Work Sans', sans-serif; font-size: 10px; font-weight: 800;
+        letter-spacing: 0.28em; text-transform: uppercase; color: rgba(246,240,234,0.64);
+      }
+      #fps-readout {
+        margin-top: 2px; font-family: 'Syne Tactile', cursive; font-size: 20px;
+        color: var(--ui-ink); letter-spacing: 0.08em;
+      }
     </style>
   </head>
   <body>
@@ -77,6 +149,10 @@
         <div><b>W A S D</b> &nbsp; move</div>
         <div><b>Shift</b> &nbsp; sprint</div>
         <div><b>Mouse</b> &nbsp; look</div>
+      </div>
+      <div id="telemetry">
+        <div id="telemetry-label">FPS</div>
+        <div id="fps-readout">000</div>
       </div>
       <div id="compass">
         <div id="compass-strip"></div>
