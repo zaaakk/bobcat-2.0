@@ -30,11 +30,15 @@ function buildController(gltf) {
 
   // Recompute bbox after scaling, then translate so feet at y=0 and centered on x/z.
   const bbox2 = new THREE.Box3().setFromObject(root);
+  const size2 = bbox2.getSize(new THREE.Vector3());
   const center2 = bbox2.getCenter(new THREE.Vector3());
   root.position.x -= center2.x;
   root.position.z -= center2.z;
   root.position.y -= bbox2.min.y;
   const footY = root.position.y; // bookkeeping for idle bob
+  const supportHalfLength = Math.max(0.08, size2.z * 0.32);
+  const supportHalfWidth = Math.max(0.05, size2.x * 0.30);
+  const groundClearance = 0.02;
 
   // Wrap in a pivot for runtime yaw.
   const pivot = new THREE.Group();
@@ -59,6 +63,8 @@ function buildController(gltf) {
   const tmpUp = new THREE.Vector3();
   const tmpFwd = new THREE.Vector3();
   const tmpFwdYaw = new THREE.Vector3();
+  const tmpSpanLR = new THREE.Vector3();
+  const tmpSpanFB = new THREE.Vector3();
   const tmpBasis = new THREE.Matrix4();
   const tmpQuat = new THREE.Quaternion();
 
@@ -104,8 +110,43 @@ function buildController(gltf) {
     state.position.x = Math.max(-halfW, Math.min(halfW, state.position.x));
     state.position.z = Math.max(-halfH, Math.min(halfH, state.position.z));
 
-    state.position.y = groundFn(state.position.x, state.position.z);
-    pivot.rotation.set(0, state.yaw, 0);
+    // Grounding the cat from a single centre sample makes it behave like a
+    // point collider, which visibly clips or floats as the terrain changes
+    // under the rest of the body. Sample a small support footprint instead and
+    // align the pivot to the local terrain plane.
+    tmpFwdYaw.set(Math.sin(state.yaw), 0, Math.cos(state.yaw));
+    tmpRight.set(Math.cos(state.yaw), 0, -Math.sin(state.yaw));
+
+    const x = state.position.x;
+    const z = state.position.z;
+    const hC = groundFn(x, z);
+    const hF = groundFn(x + tmpFwdYaw.x * supportHalfLength, z + tmpFwdYaw.z * supportHalfLength);
+    const hB = groundFn(x - tmpFwdYaw.x * supportHalfLength, z - tmpFwdYaw.z * supportHalfLength);
+    const hR = groundFn(x + tmpRight.x * supportHalfWidth, z + tmpRight.z * supportHalfWidth);
+    const hL = groundFn(x - tmpRight.x * supportHalfWidth, z - tmpRight.z * supportHalfWidth);
+
+    tmpSpanFB.set(
+      tmpFwdYaw.x * (supportHalfLength * 2),
+      hF - hB,
+      tmpFwdYaw.z * (supportHalfLength * 2)
+    );
+    tmpSpanLR.set(
+      tmpRight.x * (supportHalfWidth * 2),
+      hR - hL,
+      tmpRight.z * (supportHalfWidth * 2)
+    );
+    tmpUp.crossVectors(tmpSpanFB, tmpSpanLR).normalize();
+    if (tmpUp.y < 0) tmpUp.multiplyScalar(-1);
+
+    tmpFwd.copy(tmpFwdYaw).addScaledVector(tmpUp, -tmpFwdYaw.dot(tmpUp)).normalize();
+    tmpRight.crossVectors(tmpUp, tmpFwd).normalize();
+    tmpFwd.crossVectors(tmpRight, tmpUp).normalize();
+
+    state.position.y = Math.max(hC, (hF + hB + hR + hL) * 0.25) + groundClearance;
+    tmpBasis.makeBasis(tmpRight, tmpUp, tmpFwd);
+    tmpQuat.setFromRotationMatrix(tmpBasis);
+    pivot.quaternion.slerp(tmpQuat, Math.min(1, dt * 10));
+    state.forward.copy(tmpFwdYaw);
 
     if (mixer) mixer.update(dt);
     else {

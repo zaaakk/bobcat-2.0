@@ -65,29 +65,6 @@ const VERT = /* glsl */`
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
 
-  // Hash + value-noise. The constant offset moves the singular "0 at integer (0,0)"
-  // away from world origin so the bobcat's spawn isn't on a noise discontinuity.
-  float hash(vec2 p) { return fract(sin(dot(p + vec2(11.31, 5.97), vec2(127.1, 311.7))) * 43758.5453); }
-  float noise2(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    float a = hash(i);
-    float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0));
-    float d = hash(i + vec2(1.0, 1.0));
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-  }
-  // Mesoscale terrain detail: fractal brownian motion over (worldXZ).
-  // Returns metres of displacement, peak ≈ 0.9 m at ~3-12 m wavelength.
-  float terrainDetail(vec2 worldXZ) {
-    float n = 0.0;
-    float a = 0.55, f = 0.10;
-    for (int k = 0; k < 4; k++) {
-      n += a * (noise2(worldXZ * f) - 0.5);
-      f *= 2.13; a *= 0.55;
-    }
-    return n * 1.6;
-  }
   varying vec3 vWorldPos;
   varying vec2 vUv;
   varying vec2 vDemUv;
@@ -120,10 +97,6 @@ const VERT = /* glsl */`
 
     float h = sampleH(worldXZ);
     h = mix(h, h - 80.0, edgeFade);
-    // Add a small mesoscale displacement so the terrain doesn't read as flat
-    // angled planes between vertices. Fades out near the DEM edge so we don't
-    // amplify edge-fade discontinuities.
-    h += terrainDetail(worldXZ) * (1.0 - edgeFade);
     p.y = h;
 
     // Per-vertex normal computed from heightmap sampled at mesh-vertex spacing —
@@ -133,11 +106,10 @@ const VERT = /* glsl */`
     // show up as lighting seams.
     float dx = uMeshSpacing.x;
     float dz = uMeshSpacing.y;
-    float detailFade = 1.0 - edgeFade;
-    float hL = sampleHEdge(worldXZ - vec2(dx, 0.0)) + terrainDetail(worldXZ - vec2(dx, 0.0)) * detailFade;
-    float hR = sampleHEdge(worldXZ + vec2(dx, 0.0)) + terrainDetail(worldXZ + vec2(dx, 0.0)) * detailFade;
-    float hD = sampleHEdge(worldXZ - vec2(0.0, dz)) + terrainDetail(worldXZ - vec2(0.0, dz)) * detailFade;
-    float hU = sampleHEdge(worldXZ + vec2(0.0, dz)) + terrainDetail(worldXZ + vec2(0.0, dz)) * detailFade;
+    float hL = sampleHEdge(worldXZ - vec2(dx, 0.0));
+    float hR = sampleHEdge(worldXZ + vec2(dx, 0.0));
+    float hD = sampleHEdge(worldXZ - vec2(0.0, dz));
+    float hU = sampleHEdge(worldXZ + vec2(0.0, dz));
     vec3 tx = vec3(2.0 * dx, hR - hL, 0.0);
     vec3 tz = vec3(0.0, hU - hD, 2.0 * dz);
     vMeshNormal = normalize(cross(tz, tx));

@@ -57,8 +57,20 @@ export function createThirdPersonCamera({ camera, target, groundY, domElement })
 
     tmpCamPos.set(tmpTarget.x + ox, tmpTarget.y + oy, tmpTarget.z + oz);
 
-    // keep camera above terrain (don't clip into ground)
-    const minY = groundY(tmpCamPos.x, tmpCamPos.z) + 0.6;
+    // Walk a few sample points along the camera-to-target ray and find the
+    // highest ground height. If the camera is below that, lift it. This stops
+    // bumps between the camera and the bobcat from occluding the bobcat's
+    // lower body — we always crest the highest bump.
+    let maxBumpY = groundY(tmpCamPos.x, tmpCamPos.z);
+    const SAMPLES = 6;
+    for (let i = 1; i < SAMPLES; i++) {
+      const t = i / SAMPLES;
+      const sx = THREE.MathUtils.lerp(tmpCamPos.x, tmpTarget.x, t);
+      const sz = THREE.MathUtils.lerp(tmpCamPos.z, tmpTarget.z, t);
+      const sy = groundY(sx, sz);
+      if (sy > maxBumpY) maxBumpY = sy;
+    }
+    const minY = maxBumpY + 0.55;
     if (tmpCamPos.y < minY) tmpCamPos.y = minY;
 
     // smooth move

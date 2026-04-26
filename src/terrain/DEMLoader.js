@@ -163,34 +163,25 @@ export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
   const x1w = (ix0 + 1) * dx - halfPlane;
   const y0w = iy0 * dx - halfPlane;
   const y1w = (iy0 + 1) * dx - halfPlane;
-  const h00 = sampleHeight(dem, x0w, y0w);
-  const h10 = sampleHeight(dem, x1w, y0w);
-  const h01 = sampleHeight(dem, x0w, y1w);
-  const h11 = sampleHeight(dem, x1w, y1w);
-  // Each vertex's rendered Y also includes the procedural mesoscale detail
-  // (the shader adds it on top of the heightmap sample).
-  const d00 = terrainDetail(x0w, y0w);
-  const d10 = terrainDetail(x1w, y0w);
-  const d01 = terrainDetail(x0w, y1w);
-  const d11 = terrainDetail(x1w, y1w);
-  const v00 = h00 + d00, v10 = h10 + d10, v01 = h01 + d01, v11 = h11 + d11;
+  const v00 = sampleHeight(dem, x0w, y0w);
+  const v10 = sampleHeight(dem, x1w, y0w);
+  const v01 = sampleHeight(dem, x0w, y1w);
+  const v11 = sampleHeight(dem, x1w, y1w);
   if (fx > fy) {
-    // South-east triangle (V00, V10, V11):
-    //   barycentric: α=1−fx, β=fx−fy, γ=fy
+    // South-east triangle (V00, V10, V11):  α=1−fx, β=fx−fy, γ=fy
     return (1 - fx) * v00 + (fx - fy) * v10 + fy * v11;
   }
-  // North-west triangle (V00, V01, V11):
-  //   barycentric: α=1−fy, β=fy−fx, γ=fx
+  // North-west triangle (V00, V01, V11):    α=1−fy, β=fy−fx, γ=fx
   return (1 - fy) * v00 + (fy - fx) * v01 + fx * v11;
 }
 
 /**
- * Mesoscale detail noise — must MATCH the GLSL `terrainDetail` in TerrainMesh.js
- * exactly, otherwise plants and the bobcat float above (or sink into) the
- * visible bumps that the shader adds to the rasterised geometry.
+ * Kept for now in case anything else imports it, but the terrain shader no
+ * longer adds this displacement — the GPU's `sin()` precision diverges from
+ * Math.sin at large arguments, so the JS port couldn't reproduce the shader's
+ * value exactly and the bobcat ended up floating/sinking by up to a metre.
  */
 function hash2(x, y) {
-  // Same offset as the GLSL hash so JS and GPU agree.
   return frac(Math.sin((x + 11.31) * 127.1 + (y + 5.97) * 311.7) * 43758.5453);
 }
 function frac(v) { return v - Math.floor(v); }
