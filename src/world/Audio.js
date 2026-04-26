@@ -117,16 +117,20 @@ export function createAudio() {
     outer.gain.value = 0.0;
     outer.connect(busGain);
 
+    // Cut everything below ~900 Hz and let the noise sing in 1-6 kHz so it
+    // reads as dry, high air-flow rather than mid-range "leaves blowing".
     const hp = c.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 350; hp.Q.value = 0.5;
-    const notch = c.createBiquadFilter();
-    notch.type = 'peaking'; notch.frequency.value = 700; notch.Q.value = 0.9; notch.gain.value = -8;
+    hp.type = 'highpass'; hp.frequency.value = 900; hp.Q.value = 0.4;
     const lp = c.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 1600; lp.Q.value = 0.4;
+    lp.type = 'lowpass'; lp.frequency.value = 5800; lp.Q.value = 0.3;
+    // A small lift in the very high band (~3.5 kHz) so the whisper has a touch
+    // of bite, not a smooth pillow.
+    const tilt = c.createBiquadFilter();
+    tilt.type = 'highshelf'; tilt.frequency.value = 3200; tilt.gain.value = 3;
 
     const voice = c.createGain();
     voice.gain.value = 0.55;
-    src.connect(hp).connect(notch).connect(lp).connect(voice).connect(outer);
+    src.connect(hp).connect(lp).connect(tilt).connect(voice).connect(outer);
 
     // Slow gust LFO (when wind is on).
     const lfo = c.createOscillator();
@@ -244,14 +248,14 @@ export function createAudio() {
     }
 
     // Day vs night insect beds, cross-faded by setDayMix().
+    // Procedural cricket synth was a constant high-pitched whine — we leave
+    // the bus silent unless a real recording is provided.
     if (cicadas) {
       const src = ctx.createBufferSource();
       src.buffer = cicadas; src.loop = true;
       const g = ctx.createGain(); g.gain.value = 0.28;
       src.connect(g).connect(dayBus);
       src.start();
-    } else {
-      startCricketLayer(dayBus, 5200, 18); // cicada-ish: high & rapid
     }
     if (crickets) {
       const src = ctx.createBufferSource();
@@ -259,8 +263,6 @@ export function createAudio() {
       const g = ctx.createGain(); g.gain.value = 0.32;
       src.connect(g).connect(nightBus);
       src.start();
-    } else {
-      startCricketLayer(nightBus, 4400, 6); // cricket-ish: lower & sparser
     }
 
     if (grass) {

@@ -11,6 +11,7 @@ import { SPECIES } from './vegetation/species.js';
 
 import { createSky } from './world/Sky.js';
 import { createAudio } from './world/Audio.js';
+import { createNightVision } from './world/NightVision.js';
 import { loadBobcat } from './player/Bobcat.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
@@ -43,7 +44,9 @@ async function main() {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    if (nightVision) nightVision.resize(renderer.domElement.width, renderer.domElement.height);
   });
+  let nightVision = null;
 
   // ---------- sky ----------
   const sky = createSky(scene);
@@ -137,6 +140,11 @@ async function main() {
 
   const hud = createHUD({ dem });
 
+  // Night vision composite — initialised here so resolution matches the
+  // current renderer size (the resize handler closure picks it up later).
+  nightVision = createNightVision(renderer);
+  nightVision.resize(renderer.domElement.width, renderer.domElement.height);
+
   setLoadingProgress(1.0, 'Ready');
   hideLoading();
 
@@ -213,11 +221,9 @@ async function main() {
       tier.uniforms.uLanternIntensity.value = lantern.intensity * 0.45;
     }
 
-    // Audio: keep the day/night cross-fade in sync with the sun, fire footsteps
-    // when the bobcat is moving fast enough to plant a paw, and tick distant
-    // animal calls.
-    const sunY = sun.position.y; // mirrors state.sunDir.y * 1800
-    const dayT = THREE.MathUtils.smoothstep(sunY, -300, 200);
+    // Audio: keep the day/night cross-fade in sync with the *real* sun
+    // direction (sun.position is moon-flipped at night, see environment.update).
+    const dayT = THREE.MathUtils.smoothstep(environment.state.sunDir.y, -0.10, 0.10);
     audio.setDayMix(dayT);
     audio.tick(t);
     if (bobcat.speed > 1.2) {
@@ -240,7 +246,14 @@ async function main() {
       };
     }
 
-    renderer.render(scene, camera);
+    // Render the world through the night-vision composite. At day the lens is
+    // off (nightAmount = 0) and the composite is a near-passthrough; only the
+    // central circle gets the green-tinted high-gain look at night. Use the
+    // environment's true sun direction — sun.position is moon-flipped at
+    // night so it'd report 'day' the moment the actual sun set.
+    const trueSunY = environment.state.sunDir.y;
+    const nightAmount = 1.0 - THREE.MathUtils.smoothstep(trueSunY, -0.18, 0.06);
+    nightVision.render(scene, camera, t, nightAmount);
 
     // Adaptive resolution if frametime spikes.
     fpsAccum += dt; fpsFrames++;
@@ -412,5 +425,5 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
     }
   }
 
-  return { update };
+  return { update, state };
 }
