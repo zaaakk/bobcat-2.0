@@ -83,13 +83,18 @@ function loadImage(src, onProgress) {
 }
 
 /**
- * Heightmap texture: float-32 single-channel, raw metres. Requires
- * OES_texture_float_linear for filtering — most desktop GPUs support it.
+ * Heightmap texture as R16F (half-float). Filtering R16F is core WebGL2 — it
+ * doesn't need OES_texture_float_linear (which R32F does). We saw R32F return
+ * zeroed samples on some configurations (notably headless Chromium).
  */
 export function heightmapTexture(THREE, dem) {
+  const halfData = new Uint16Array(dem.data.length);
+  for (let i = 0; i < dem.data.length; i++) {
+    halfData[i] = THREE.DataUtils.toHalfFloat(dem.data[i]);
+  }
   const tex = new THREE.DataTexture(
-    dem.data, dem.width, dem.height,
-    THREE.RedFormat, THREE.FloatType
+    halfData, dem.width, dem.height,
+    THREE.RedFormat, THREE.HalfFloatType
   );
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -101,19 +106,26 @@ export function heightmapTexture(THREE, dem) {
   return tex;
 }
 
+/**
+ * Bilinear height sample matching the GPU's texture sampling convention. The
+ * GPU treats pixel n as living at uv = (n + 0.5) / W, so a sample at uv = 0.5
+ * blends pixels W/2-1 and W/2 equally. Without the −0.5 offset, JS and shader
+ * disagree by half a pixel — enough that the bobcat ends up below the rendered
+ * terrain on a slope.
+ */
 export function sampleHeight(dem, x, z) {
-  const u = (x / dem.worldWidth + 0.5) * dem.width;
-  const v = (z / dem.worldHeight + 0.5) * dem.height;
+  const u = (x / dem.worldWidth + 0.5) * dem.width - 0.5;
+  const v = (z / dem.worldHeight + 0.5) * dem.height - 0.5;
   const x0 = Math.floor(u), y0 = Math.floor(v);
-  const x1 = Math.min(x0 + 1, dem.width - 1);
-  const y1 = Math.min(y0 + 1, dem.height - 1);
+  const fx = u - x0, fy = v - y0;
   const cx0 = Math.max(0, Math.min(dem.width - 1, x0));
   const cy0 = Math.max(0, Math.min(dem.height - 1, y0));
-  const fx = u - x0, fy = v - y0;
+  const cx1 = Math.max(0, Math.min(dem.width - 1, x0 + 1));
+  const cy1 = Math.max(0, Math.min(dem.height - 1, y0 + 1));
   const h00 = dem.data[cy0 * dem.width + cx0];
-  const h10 = dem.data[cy0 * dem.width + x1];
-  const h01 = dem.data[y1 * dem.width + cx0];
-  const h11 = dem.data[y1 * dem.width + x1];
+  const h10 = dem.data[cy0 * dem.width + cx1];
+  const h01 = dem.data[cy1 * dem.width + cx0];
+  const h11 = dem.data[cy1 * dem.width + cx1];
   const h0 = h00 * (1 - fx) + h10 * fx;
   const h1 = h01 * (1 - fx) + h11 * fx;
   return h0 * (1 - fy) + h1 * fy;

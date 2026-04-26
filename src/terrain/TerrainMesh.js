@@ -172,6 +172,6 @@ const FRAG = /* glsl */`
     vec3 fogCol = mix(uFogColorNear, uFogColorFar, fFar);
     lit = mix(lit, fogCol, fNear * 0.35 + fFar * 0.65);
 
-    gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); // DEBUG bright magenta — terrain should be magenta everywhere
+    gl_FragColor = vec4(lit, 1.0);
   }
 `;
