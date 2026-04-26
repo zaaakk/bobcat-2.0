@@ -1,0 +1,23 @@
+{
+  "source": "mapzen-terrarium",
+  "zoom": 13,
+  "width": 1280,
+  "height": 1280,
+  "pixelSizeMeters": 16.521099139159023,
+  "worldWidthMeters": 21147.00689812355,
+  "worldHeightMeters": 21147.00689812355,
+  "minElevation": 445.83203125,
+  "maxElevation": 696.0859375,
+  "bbox": {
+    "minLon": -101.6455078125,
+    "maxLon": -101.42578125,
+    "minLat": 30.069093964438878,
+    "maxLat": 30.259067203213018
+  },
+  "tileGrid": {
+    "xMin": 1783,
+    "yMin": 3373,
+    "xMax": 1787,
+    "yMax": 3377
+  }
+}
