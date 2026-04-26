@@ -123,7 +123,11 @@ function buildController(gltf) {
     }
   }
 
-  return { ...state, update };
+  // Return state itself (not a spread) so live primitives — speed, yaw — stay
+  // in sync with the controller's internal updates instead of freezing at the
+  // construction-time snapshot.
+  state.update = update;
+  return state;
 }
 
 function lerpAngle(a, b, t) {

@@ -170,33 +170,55 @@ const FRAG = /* glsl */`
   void main() {
     vec2 worldXZ = vWorldPos.xz;
     // Two scales of tiling, blended so close-up texture detail isn't a single
-    // monotonous repeat. The far scale also masks the seam between tile copies.
+    // monotonous repeat. The far scale masks the wrap seam.
     vec2 tileUv = worldXZ / uTextureScale;
     vec2 tileUvFar = worldXZ / (uTextureScale * 6.0);
+    float distView = length(cameraPosition - vWorldPos);
+    // Closer = use the crisp local tile; farther = lean on the broader pattern
+    // so per-pixel variance fades with distance (matches the "low-detail at
+    // distance" instruction without forcing a hard mip cliff).
+    float farBlend = mix(0.55, 0.92, smoothstep(80.0, 800.0, distView));
 
-    vec3 cRock   = mix(texture2D(uTexRock,   tileUv).rgb, texture2D(uTexRock,   tileUvFar).rgb, 0.45);
-    vec3 cGrass  = mix(texture2D(uTexGrass,  tileUv).rgb, texture2D(uTexGrass,  tileUvFar).rgb, 0.45);
-    vec3 cGravel = mix(texture2D(uTexGravel, tileUv).rgb, texture2D(uTexGravel, tileUvFar).rgb, 0.45);
-    vec3 cSand   = mix(texture2D(uTexSand,   tileUv).rgb, texture2D(uTexSand,   tileUvFar).rgb, 0.45);
+    vec3 cRock   = mix(texture2D(uTexRock,   tileUv).rgb, texture2D(uTexRock,   tileUvFar).rgb, farBlend);
+    vec3 cGrass  = mix(texture2D(uTexGrass,  tileUv).rgb, texture2D(uTexGrass,  tileUvFar).rgb, farBlend);
+    vec3 cGravel = mix(texture2D(uTexGravel, tileUv).rgb, texture2D(uTexGravel, tileUvFar).rgb, farBlend);
+    vec3 cSand   = mix(texture2D(uTexSand,   tileUv).rgb, texture2D(uTexSand,   tileUvFar).rgb, farBlend);
 
+    // Sharpen each tile's contrast — pushes "small rocks, light/dark breakup"
+    // visible in the source PNGs into the rendered surface.
+    cRock   = clamp((cRock   - 0.5) * 1.32 + 0.5, 0.0, 1.0);
+    cGrass  = clamp((cGrass  - 0.5) * 1.18 + 0.5, 0.0, 1.0);
+    cGravel = clamp((cGravel - 0.5) * 1.28 + 0.5, 0.0, 1.0);
+    cSand   = clamp((cSand   - 0.5) * 1.10 + 0.5, 0.0, 1.0);
+
+    // Chunky splat: bias each weight toward 0 or 1 so transitions between
+    // ground types read as crisp boundaries instead of soft watercolor mixes.
     vec4 splat = texture2D(uSplat, vDemUv);
     splat = mix(splat, vec4(0.05, 0.0, 0.7, 0.25), vEdgeFade);
+    splat = pow(splat, vec4(1.6));
+    splat /= max(splat.r + splat.g + splat.b + splat.a, 1e-3);
 
     vec3 albedo = cRock * splat.r + cGrass * splat.g + cGravel * splat.b + cSand * splat.a;
-    // Cool the close-up albedo slightly — the bare-sand desert reads too warm
-    // by default. This is a small tint, not a desaturation.
-    albedo *= vec3(0.95, 0.97, 1.02);
 
-    // Detail normal — small perturbation, distance-faded so the repeating tile
-    // pattern doesn't make obvious bands at glancing angles.
-    float detailDist = length(cameraPosition - vWorldPos);
-    float detailAmt = 0.18 * (1.0 - smoothstep(40.0, 220.0, detailDist));
+    // Detail normal — punchier on close ground so low-res textures still read
+    // form. Faded out with distance to avoid tile banding at oblique angles.
+    float detailAmt = 0.55 * (1.0 - smoothstep(20.0, 260.0, distView));
     vec3 detail = texture2D(uNormal, tileUv * 0.5).rgb * 2.0 - 1.0;
     detail.y = abs(detail.y);
     vec3 n = normalize(vMeshNormal + detail * detailAmt);
 
+    // One strong direct sun. The fill ambient is small; a hemi-style ground
+    // bounce (proportional to upward-facing normal) prevents the underside of
+    // a slope from dropping to crushed black.
     float NdotL = clamp(dot(n, uSunDir), 0.0, 1.0);
-    vec3 lit = albedo * (uSunColor * NdotL + uAmbientColor);
+    float upT = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 fill = uAmbientColor * mix(0.55, 1.0, upT);
+    vec3 lit = albedo * (uSunColor * NdotL * 1.35 + fill);
+
+    // Crushed shadow: don't let the darkest fragments fall below a slightly
+    // cool floor, which keeps form readable without the modern soft-GI lift.
+    vec3 shadowFloor = uAmbientColor * 0.55;
+    lit = max(lit, albedo * shadowFloor);
 
     // Aerial perspective: exponential extinction with two-stage colour mix.
     // Closer haze is a desaturated cool grey, deep distance is rayleigh-blue.
@@ -209,19 +231,44 @@ const FRAG = /* glsl */`
     float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
     float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
     float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
-    float fog = 1.0 - exp(-dist * uFogDensity * densityBoost); // 0..1
-    float fogStage = smoothstep(0.28, 0.82, fog);              // late-stage bias
+    float fogRaw = 1.0 - exp(-dist * uFogDensity * densityBoost);
+    // Stepped band so the falloff has visible character — not a single smooth
+    // ramp. Five soft bands; the floor() quantises while the +0.5 within-band
+    // smooth keeps each step's edge soft enough not to read as a hard line.
+    float fogBanded = floor(fogRaw * 5.0) / 5.0 + smoothstep(0.0, 0.2, fract(fogRaw * 5.0)) * 0.2;
+    float fog = mix(fogRaw, fogBanded, 0.55);
+    // Midground desaturate kick (40-70% fog): pulls the colour toward grey
+    // before the deep blue takes over at the horizon.
+    float fogStage = smoothstep(0.28, 0.82, fog);
     vec3 fogCol = mix(
       mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
       uFogColorFar,
       fogStage
     );
+    float midDesat = smoothstep(0.30, 0.55, fog) * (1.0 - smoothstep(0.55, 0.82, fog));
+    float fogLum = dot(fogCol, vec3(0.299, 0.587, 0.114));
+    fogCol = mix(fogCol, vec3(fogLum), midDesat * 0.35);
+
     float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
     fogCol += uSunColor * sunScatter * horizon * fog * 0.22;
-    // Slight altitude tint — high terrain reads cooler/bluer because more air column.
     float altT = smoothstep(0.0, uHorizonAlt, vWorldPos.y - cameraPosition.y + 800.0);
     fogCol = mix(fogCol, uFogColorFar, altT * 0.15);
+
+    // Reduce the LIT scene's saturation as fog rises — the further away, the
+    // less pure the underlying texture should read before being replaced by
+    // sky colour.
+    float litLum = dot(lit, vec3(0.299, 0.587, 0.114));
+    lit = mix(lit, vec3(litLum), smoothstep(0.0, 0.7, fog) * 0.45);
+
     lit = mix(lit, fogCol, fog);
+
+    // Local-contrast / split-tone grade. Compresses dynamic range a little,
+    // adds a warm bias to highlights and a cool bias to shadows. Restrained.
+    lit = (lit - 0.5) * 1.12 + 0.5;
+    float gradeLum = clamp(dot(lit, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+    vec3 warmHi = vec3(1.04, 1.00, 0.93);
+    vec3 coolLo = vec3(0.93, 0.97, 1.06);
+    lit *= mix(coolLo, warmHi, smoothstep(0.18, 0.78, gradeLum));
 
     gl_FragColor = vec4(lit, 1.0);
   }

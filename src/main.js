@@ -10,6 +10,7 @@ import { createInstancedPlants } from './vegetation/InstancedPlants.js';
 import { SPECIES } from './vegetation/species.js';
 
 import { createSky } from './world/Sky.js';
+import { createAudio } from './world/Audio.js';
 import { loadBobcat } from './player/Bobcat.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
@@ -152,12 +153,20 @@ async function main() {
   const environment = createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient });
   environment.update(0);
 
+  const audio = createAudio();
+  // Browsers gate AudioContext until a user gesture; start the soundscape on
+  // first interaction.
+  const startAudioOnce = () => { audio.start(); window.removeEventListener('pointerdown', startAudioOnce); window.removeEventListener('keydown', startAudioOnce); };
+  window.addEventListener('pointerdown', startAudioOnce);
+  window.addEventListener('keydown', startAudioOnce);
+
   // ---------- render loop ----------
   const clock = new THREE.Clock();
   let last = performance.now();
   let fpsAccum = 0, fpsFrames = 0;
   let qualityLevel = 1; // 1 = full, can drop to 0.85
   let displayFps = 60;
+  let lastFootAt = 0;
 
   function frame() {
     const now = performance.now();
@@ -178,6 +187,22 @@ async function main() {
 
     environment.update(t);
     plants.update(t, camera.position);
+
+    // Audio: keep the day/night cross-fade in sync with the sun, fire footsteps
+    // when the bobcat is moving fast enough to plant a paw, and tick distant
+    // animal calls.
+    const sunY = sun.position.y; // mirrors state.sunDir.y * 1800
+    const dayT = THREE.MathUtils.smoothstep(sunY, -300, 200);
+    audio.setDayMix(dayT);
+    audio.tick(t);
+    if (bobcat.speed > 1.2) {
+      const speedT = THREE.MathUtils.clamp(bobcat.speed / bobcat.runSpeed, 0, 1);
+      const cadence = 0.36 - 0.18 * speedT;
+      if (t - lastFootAt > cadence) {
+        audio.footstep(speedT);
+        lastFootAt = t;
+      }
+    }
 
     hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps });
     if (typeof window !== 'undefined') {
@@ -335,23 +360,22 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
     }
 
     const direct = Math.max(0, state.sunDir.y);
-    // At night, the sunlight direction is repurposed as moonlight — opposite
-    // hemisphere of the sky, dim, cool.
     if (state.sunDir.y < 0) {
       sun.position.set(-state.sunDir.x, -state.sunDir.y, -state.sunDir.z).multiplyScalar(1800);
     } else {
       sun.position.copy(state.sunDir).multiplyScalar(1800);
     }
     sun.color.copy(state.sunColor);
-    // Direct sun by day, weak silvery moon by night (kicks in below the horizon).
+    // Strong direct sun, weak fill — shapes form on the bobcat's PBR materials
+    // the same way the terrain shader is already shading the ground.
     const moonStrength = Math.max(0, -state.sunDir.y);
-    sun.intensity = Math.pow(direct, 0.42) * 2.8 + twilightBand * 0.18 + moonStrength * 0.55;
+    sun.intensity = Math.pow(direct, 0.42) * 4.4 + twilightBand * 0.22 + moonStrength * 0.65;
     hemi.color.copy(state.hemiSky);
     hemi.groundColor.copy(state.hemiGround);
-    hemi.intensity = THREE.MathUtils.lerp(0.42, 0.72, daylight) + twilightBand * 0.08;
+    hemi.intensity = THREE.MathUtils.lerp(0.32, 0.42, daylight) + twilightBand * 0.06;
     ambient.color.copy(state.ambient);
-    ambient.intensity = THREE.MathUtils.lerp(0.18, 0.26, daylight) + night * 0.04;
-    renderer.toneMappingExposure = THREE.MathUtils.lerp(0.78, 1.06, daylight) + twilightBand * 0.04;
+    ambient.intensity = THREE.MathUtils.lerp(0.14, 0.16, daylight) + night * 0.04;
+    renderer.toneMappingExposure = THREE.MathUtils.lerp(0.82, 1.0, daylight) + twilightBand * 0.04;
   }
 
   return { update };
