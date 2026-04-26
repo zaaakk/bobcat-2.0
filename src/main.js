@@ -3,37 +3,32 @@ import * as THREE from 'three';
 import { loadDEM, heightmapTexture, sampleHeight } from './terrain/DEMLoader.js';
 import { generateSplatMap } from './terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from './terrain/TerrainMesh.js';
-import { createSky } from './world/Sky.js';
+
 import { buildSpriteAtlas } from './vegetation/SpriteAtlas.js';
 import { placeVegetation } from './vegetation/PlacementEngine.js';
 import { createInstancedPlants } from './vegetation/InstancedPlants.js';
 import { SPECIES } from './vegetation/species.js';
+
+import { createSky } from './world/Sky.js';
 import { loadBobcat } from './player/Bobcat.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
+import { createHUD, setLoadingProgress, hideLoading } from './ui/HUD.js';
 
 main().catch(err => {
   console.error(err);
-  const st = document.getElementById('loading-status');
-  if (st) st.textContent = 'Failed: ' + err.message;
+  setLoadingProgress(1, 'Failed: ' + err.message);
 });
 
-function setProgress(t, status) {
-  const bar = document.getElementById('loading-bar');
-  const st = document.getElementById('loading-status');
-  if (bar) bar.style.width = `${Math.round(t * 100)}%`;
-  if (st && status) st.textContent = status;
-}
-
-function hideLoading() {
-  const el = document.getElementById('loading');
-  if (el) { el.classList.add('hidden'); setTimeout(() => el.remove(), 700); }
-}
-
 async function main() {
+  // ---------- renderer ----------
   const canvas = document.createElement('canvas');
   document.getElementById('app').appendChild(canvas);
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: 'high-performance'
+  });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -42,22 +37,27 @@ async function main() {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 25000);
+
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
   });
 
+  // ---------- sky ----------
   createSky(scene);
 
-  setProgress(0.05, 'Loading terrain…');
+  // ---------- DEM ----------
+  setLoadingProgress(0.05, 'Loading terrain…');
   const dem = await loadDEM('/assets/dem/terrarium.png', '/assets/dem/terrarium.json',
-    t => setProgress(0.05 + t * 0.20, 'Loading terrain…'));
+    t => setLoadingProgress(0.05 + t * 0.30, 'Loading terrain…'));
+  console.log(`DEM ${dem.width}x${dem.height}, ${dem.worldWidth.toFixed(0)}x${dem.worldHeight.toFixed(0)}m, elev ${dem.minZ.toFixed(0)}–${dem.maxZ.toFixed(0)}m`);
 
-  setProgress(0.30, 'Painting ground…');
+  setLoadingProgress(0.40, 'Painting ground…');
   const heightTex = heightmapTexture(THREE, dem);
   const splatTex = generateSplatMap(dem, 768);
 
+  // ---------- ground textures ----------
   const texLoader = new THREE.TextureLoader();
   function loadTex(url) {
     return new Promise((res, rej) => texLoader.load(url, t => {
@@ -75,7 +75,7 @@ async function main() {
     loadTex('/assets/ground/normal.png')
   ]);
 
-  setProgress(0.50, 'Building terrain mesh…');
+  setLoadingProgress(0.55, 'Building terrain mesh…');
   const terrain = createTerrainMesh({
     dem, heightTex, splatTex,
     groundTextures: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
@@ -85,10 +85,11 @@ async function main() {
   });
   scene.add(terrain.mesh);
 
-  setProgress(0.60, 'Loading flora…');
+  // ---------- vegetation ----------
+  setLoadingProgress(0.65, 'Loading flora…');
   const atlas = await buildSpriteAtlas(SPECIES, 512);
 
-  setProgress(0.72, 'Placing vegetation…');
+  setLoadingProgress(0.75, 'Placing vegetation…');
   const instances = placeVegetation({
     dem,
     cellSize: 7.0,
@@ -101,10 +102,12 @@ async function main() {
   const plants = createInstancedPlants({ atlas, instances, dem });
   for (const tier of plants.tiers) scene.add(tier.mesh);
 
-  setProgress(0.85, 'Waking bobcat…');
+  // ---------- player ----------
+  setLoadingProgress(0.88, 'Waking bobcat…');
   const bobcat = await loadBobcat({
-    onProgress: t => setProgress(0.85 + t * 0.13, 'Waking bobcat…')
+    onProgress: t => setLoadingProgress(0.88 + t * 0.10, 'Waking bobcat…')
   });
+  // Spawn at DEM centre, on the ground.
   bobcat.position.set(0, sampleHeight(dem, 0, 0), 0);
   bobcat.yaw = 0;
   bobcat.pivot.rotation.y = 0;
@@ -113,18 +116,28 @@ async function main() {
   const cam = createThirdPersonCamera({ camera, target: bobcat, dem, domElement: renderer.domElement });
   const input = createInput();
 
-  // Lights — terrain/plants self-light in shaders; these light the GLB bobcat.
+  const hud = createHUD({ dem });
+
+  setLoadingProgress(1.0, 'Ready');
+  hideLoading();
+
+  // ---------- light ----------
+  // Terrain and plants do their own lighting in shaders; these light the bobcat
+  // (which has standard PBR materials from its GLB).
   const sun = new THREE.DirectionalLight(0xfff0d6, 2.6);
   sun.position.set(500, 850, 200);
   scene.add(sun);
-  scene.add(new THREE.HemisphereLight(0xb6c8e0, 0x6a5a3e, 0.7));
-  scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+  const hemi = new THREE.HemisphereLight(0xb6c8e0, 0x6a5a3e, 0.7);
+  scene.add(hemi);
+  const ambient = new THREE.AmbientLight(0xffffff, 0.25);
+  scene.add(ambient);
 
-  setProgress(1.0, 'Ready');
-  hideLoading();
-
+  // ---------- render loop ----------
   const clock = new THREE.Clock();
   let last = performance.now();
+  let fpsAccum = 0, fpsFrames = 0;
+  let qualityLevel = 1; // 1 = full, can drop to 0.85
+
   function frame() {
     const now = performance.now();
     const dt = Math.min(0.05, (now - last) / 1000);
@@ -136,7 +149,25 @@ async function main() {
     cam.update(dt);
 
     plants.update(t, camera.position);
+
+    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position });
+
     renderer.render(scene, camera);
+
+    // Adaptive resolution if frametime spikes.
+    fpsAccum += dt; fpsFrames++;
+    if (fpsAccum > 1.0) {
+      const fps = fpsFrames / fpsAccum;
+      fpsAccum = 0; fpsFrames = 0;
+      if (fps < 45 && qualityLevel > 0.7) {
+        qualityLevel = Math.max(0.7, qualityLevel - 0.05);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6) * qualityLevel);
+      } else if (fps > 58 && qualityLevel < 1) {
+        qualityLevel = Math.min(1, qualityLevel + 0.05);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6) * qualityLevel);
+      }
+    }
+
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
