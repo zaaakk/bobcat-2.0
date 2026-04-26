@@ -103,26 +103,40 @@ export function createAudio() {
   function startWindBed(busGain) {
     const c = ensureCtx();
     if (!c) return null;
+
+    // Open-land wind: pink-noise base split through three resonant bandpass
+    // voices (low body, mid airflow, high grass-rustle), each modulated by a
+    // slow LFO at a different period so the texture never reads as a steady
+    // shhhh. The result is more "across the field" than the previous brown
+    // rumble.
     const src = c.createBufferSource();
-    src.buffer = noiseBuffer(8.0, 'brown');
+    src.buffer = noiseBuffer(12.0, 'pink');
     src.loop = true;
-    const lp = c.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 320; lp.Q.value = 0.5;
-    const hp = c.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 60;
-    const g = c.createGain();
-    g.gain.value = 0.0;
-    src.connect(hp).connect(lp).connect(g).connect(busGain);
+
+    const summing = c.createGain();
+    summing.gain.value = 1.0;
+    summing.connect(busGain);
+
+    function band(centerHz, q, baseGain, lfoHz, lfoDepth) {
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = centerHz; bp.Q.value = q;
+      const g = c.createGain(); g.gain.value = baseGain;
+      src.connect(bp).connect(g).connect(summing);
+      const lfo = c.createOscillator();
+      lfo.frequency.value = lfoHz;
+      const lfoGain = c.createGain();
+      lfoGain.gain.value = lfoDepth;
+      lfo.connect(lfoGain).connect(g.gain);
+      lfo.start();
+      return { bp, g, lfo };
+    }
+
+    band(220,  0.7, 0.16, 0.075, 0.12);  // low body — distant air
+    band(820,  1.4, 0.22, 0.13,  0.18);  // mid — airflow over open ground
+    band(2400, 2.1, 0.10, 0.21,  0.07);  // high — grass rustle
+
     src.start();
-    // Slow amplitude modulation — gusts every 6-14s
-    const lfo = c.createOscillator();
-    const lfoGain = c.createGain();
-    lfo.frequency.value = 0.085;
-    lfoGain.gain.value = 0.16;
-    lfo.connect(lfoGain).connect(g.gain);
-    lfo.start();
-    g.gain.value = 0.18;
-    return { src, gain: g, lfo };
+    return { src, summing };
   }
 
   function startCricketLayer(busGain, baseFreq, rateHz) {

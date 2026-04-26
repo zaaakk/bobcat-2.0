@@ -150,7 +150,15 @@ async function main() {
   scene.add(hemi);
   const ambient = new THREE.AmbientLight(0xffffff, 0.25);
   scene.add(ambient);
-  const environment = createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient });
+
+  // A small "lantern" point light that hovers above the bobcat. Off during the
+  // day; fades on at dusk and stays on through the night so the player has a
+  // local pool of warm light tracking with them.
+  const lantern = new THREE.PointLight(0xffd9a8, 0, 18, 1.4);
+  lantern.castShadow = false;
+  scene.add(lantern);
+
+  const environment = createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient, lantern });
   environment.update(0);
 
   const audio = createAudio();
@@ -187,6 +195,13 @@ async function main() {
 
     environment.update(t);
     plants.update(t, camera.position);
+    // Park the lantern just above the bobcat with a slight bob so it reads as
+    // a hovering will-o'-wisp rather than a baked-in glow.
+    lantern.position.set(
+      bobcat.position.x,
+      bobcat.position.y + 1.6 + Math.sin(t * 1.4) * 0.05,
+      bobcat.position.z
+    );
 
     // Audio: keep the day/night cross-fade in sync with the sun, fire footsteps
     // when the bobcat is moving fast enough to plant a paw, and tick distant
@@ -196,8 +211,11 @@ async function main() {
     audio.setDayMix(dayT);
     audio.tick(t);
     if (bobcat.speed > 1.2) {
+      // Map speed to a cadence — shorter (= more frequent) at higher speeds.
+      // Walk (~3 m/s) ≈ 0.50 s between paws; full sprint (~15 m/s) ≈ 0.13 s.
+      // Roughly 4× difference so walk and sprint sound clearly distinct.
       const speedT = THREE.MathUtils.clamp(bobcat.speed / bobcat.runSpeed, 0, 1);
-      const cadence = 0.36 - 0.18 * speedT;
+      const cadence = 0.50 - 0.37 * speedT;
       if (t - lastFootAt > cadence) {
         audio.footstep(speedT);
         lastFootAt = t;
@@ -260,16 +278,16 @@ function chooseSpawnPoint(dem, groundY, maxRadius = 2800) {
   return fallback;
 }
 
-function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient }) {
+function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient, lantern }) {
   const cycleSeconds = 240;
   const phaseOffset = 0.18;
   const palette = {
-    skyTopDay:    new THREE.Color('#4f9ee0'),
-    skyTopNight:  new THREE.Color('#1c2a44'),  // moonlit, not pitch black
+    skyTopDay:    new THREE.Color('#74c2ff'),  // zenith
+    skyTopNight:  new THREE.Color('#1c2a44'),
     skyTopDusk:   new THREE.Color('#36547f'),
-    horizonDay:   new THREE.Color('#d6d8d2'),
+    horizonDay:   new THREE.Color('#94dcff'),  // bottom of azimuth
     horizonNight: new THREE.Color('#2a3b54'),
-    hazeDay:      new THREE.Color('#e6d8c7'),
+    hazeDay:      new THREE.Color('#94dcff'),  // matches the horizon so haze doesn't smear in a separate colour
     hazeNight:    new THREE.Color('#384c69'),
     hazeDusk:     new THREE.Color('#ef9c67'),
     fogLowDay:    new THREE.Color('#c9d1d8'),
@@ -376,6 +394,12 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
     ambient.color.copy(state.ambient);
     ambient.intensity = THREE.MathUtils.lerp(0.14, 0.16, daylight) + night * 0.04;
     renderer.toneMappingExposure = THREE.MathUtils.lerp(0.82, 1.0, daylight) + twilightBand * 0.04;
+
+    // The lantern: only really on at night. We don't move it here — main.js
+    // ticks it onto the bobcat's position each frame.
+    if (lantern) {
+      lantern.intensity = night * 6.5 + twilightBand * 1.2;
+    }
   }
 
   return { update };
