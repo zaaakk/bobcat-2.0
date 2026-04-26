@@ -104,39 +104,41 @@ export function createAudio() {
     const c = ensureCtx();
     if (!c) return null;
 
-    // Open-land wind: pink-noise base split through three resonant bandpass
-    // voices (low body, mid airflow, high grass-rustle), each modulated by a
-    // slow LFO at a different period so the texture never reads as a steady
-    // shhhh. The result is more "across the field" than the previous brown
-    // rumble.
+    // Dry desert wind: white-noise base, mid frequencies notched out so it
+    // doesn't read as ocean churn. A high-shelf cut and a low-pass at 1.6 kHz
+    // give the airy, dusty character; one slow LFO modulates a single voice
+    // so gusts are gentle, not breathy. Quiet by default — this is bed, not
+    // foreground.
     const src = c.createBufferSource();
-    src.buffer = noiseBuffer(12.0, 'pink');
+    src.buffer = noiseBuffer(12.0, 'white');
     src.loop = true;
 
-    const summing = c.createGain();
-    summing.gain.value = 1.0;
-    summing.connect(busGain);
+    const overall = c.createGain();
+    overall.gain.value = 0.10;            // ← much quieter than before
+    overall.connect(busGain);
 
-    function band(centerHz, q, baseGain, lfoHz, lfoDepth) {
-      const bp = c.createBiquadFilter();
-      bp.type = 'bandpass'; bp.frequency.value = centerHz; bp.Q.value = q;
-      const g = c.createGain(); g.gain.value = baseGain;
-      src.connect(bp).connect(g).connect(summing);
-      const lfo = c.createOscillator();
-      lfo.frequency.value = lfoHz;
-      const lfoGain = c.createGain();
-      lfoGain.gain.value = lfoDepth;
-      lfo.connect(lfoGain).connect(g.gain);
-      lfo.start();
-      return { bp, g, lfo };
-    }
+    // Cut the muddy low-mids that made it feel like surf.
+    const hp = c.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 350; hp.Q.value = 0.5;
+    const notch = c.createBiquadFilter();
+    notch.type = 'peaking'; notch.frequency.value = 700; notch.Q.value = 0.9; notch.gain.value = -8;
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1600; lp.Q.value = 0.4;
 
-    band(220,  0.7, 0.16, 0.075, 0.12);  // low body — distant air
-    band(820,  1.4, 0.22, 0.13,  0.18);  // mid — airflow over open ground
-    band(2400, 2.1, 0.10, 0.21,  0.07);  // high — grass rustle
+    const voice = c.createGain();
+    voice.gain.value = 0.55;
+    src.connect(hp).connect(notch).connect(lp).connect(voice).connect(overall);
+
+    // One unhurried gust LFO — not three layered ones.
+    const lfo = c.createOscillator();
+    lfo.frequency.value = 0.07;
+    const lfoGain = c.createGain();
+    lfoGain.gain.value = 0.18;
+    lfo.connect(lfoGain).connect(voice.gain);
+    lfo.start();
 
     src.start();
-    return { src, summing };
+    return { src, overall };
   }
 
   function startCricketLayer(busGain, baseFreq, rateHz) {
@@ -200,7 +202,7 @@ export function createAudio() {
     if (wind) {
       const src = ctx.createBufferSource();
       src.buffer = wind; src.loop = true;
-      const g = ctx.createGain(); g.gain.value = 0.32;
+      const g = ctx.createGain(); g.gain.value = 0.16;   // bed-volume, not foreground
       src.connect(g).connect(master);
       src.start();
     } else {

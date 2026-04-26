@@ -53,6 +53,11 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uFogColorLow:  { value: new THREE.Color('#c9d1d8') },
     uFogColorMid:  { value: new THREE.Color('#96abc1') },
     uFogColorFar:  { value: new THREE.Color('#668db8') },
+    uExposure:     { value: 1.18 },
+    uLanternPos:   { value: new THREE.Vector3() },
+    uLanternColor: { value: new THREE.Color(1.0, 0.85, 0.66) },
+    uLanternRange: { value: 22.0 },
+    uLanternIntensity: { value: 0.0 },
     uTime: { value: 0 }
   };
 
@@ -280,6 +285,11 @@ const FRAG = /* glsl */`
   uniform vec3 uAmbient;
   uniform float uFogDensity;
   uniform vec3 uFogColorLow, uFogColorMid, uFogColorFar;
+  uniform float uExposure;
+  uniform vec3 uLanternPos;
+  uniform vec3 uLanternColor;
+  uniform float uLanternRange;
+  uniform float uLanternIntensity;
   varying vec2 vAtlasUv;
   varying float vFade;
   varying vec3 vWorldPos;
@@ -293,7 +303,16 @@ const FRAG = /* glsl */`
     // Approximate top-lit foliage shading.
     float ndl = clamp(dot(vNormal, uSunDir), 0.0, 1.0);
     float topLight = clamp(uSunDir.y, 0.0, 1.0);
-    vec3 lit = tex.rgb * (uSunColor * (0.4 + 0.6 * topLight) + uAmbient * 0.7);
+    vec3 lit = tex.rgb * (uSunColor * (0.55 + 0.55 * topLight) + uAmbient * 0.95);
+
+    // Lantern pool — adds warm light to plants near the bobcat.
+    vec3 toLantern = uLanternPos - vWorldPos;
+    float lanternD = length(toLantern);
+    float lanternAtt = clamp(1.0 - lanternD / uLanternRange, 0.0, 1.0);
+    lanternAtt *= lanternAtt;
+    lit += tex.rgb * uLanternColor * 0.9 * lanternAtt * uLanternIntensity;
+
+    lit *= uExposure;
 
     // Aerial perspective — same model as the terrain.
     vec3 viewRay = normalize(vWorldPos - cameraPosition);

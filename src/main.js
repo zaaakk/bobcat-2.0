@@ -202,6 +202,15 @@ async function main() {
       bobcat.position.y + 1.6 + Math.sin(t * 1.4) * 0.05,
       bobcat.position.z
     );
+    // The terrain and plant shaders are custom (not Three.js standard
+    // materials), so PointLight doesn't reach them automatically — push the
+    // lantern as plain uniforms so the ground actually catches the glow.
+    terrain.uniforms.uLanternPos.value.copy(lantern.position);
+    terrain.uniforms.uLanternIntensity.value = lantern.intensity * 0.42;
+    for (const tier of plants.tiers) {
+      tier.uniforms.uLanternPos.value.copy(lantern.position);
+      tier.uniforms.uLanternIntensity.value = lantern.intensity * 0.45;
+    }
 
     // Audio: keep the day/night cross-fade in sync with the sun, fire footsteps
     // when the bobcat is moving fast enough to plant a paw, and tick distant

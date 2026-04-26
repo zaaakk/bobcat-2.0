@@ -36,7 +36,12 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uFogColorLow:  { value: new THREE.Color('#c9d1d8') },
     uFogColorMid:  { value: new THREE.Color('#96abc1') },
     uFogColorFar:  { value: new THREE.Color('#668db8') },
-    uHorizonAlt:   { value: 1200.0 }     // metres above which sky tint dominates
+    uHorizonAlt:   { value: 1200.0 },    // metres above which sky tint dominates
+    uExposure:     { value: 1.18 },      // pre-fog brightness lift on the lit albedo
+    uLanternPos:   { value: new THREE.Vector3() },
+    uLanternColor: { value: new THREE.Color(1.0, 0.85, 0.66) },
+    uLanternRange: { value: 22.0 },
+    uLanternIntensity: { value: 0.0 }
   };
 
   const material = new THREE.ShaderMaterial({
@@ -161,6 +166,11 @@ const FRAG = /* glsl */`
   uniform float uFogDensity;
   uniform float uHorizonAlt;
   uniform vec3 uFogColorLow, uFogColorMid, uFogColorFar;
+  uniform float uExposure;
+  uniform vec3 uLanternPos;
+  uniform vec3 uLanternColor;
+  uniform float uLanternRange;
+  uniform float uLanternIntensity;
   varying vec3 vWorldPos;
   varying vec2 vUv;
   varying vec2 vDemUv;
@@ -212,13 +222,24 @@ const FRAG = /* glsl */`
     // a slope from dropping to crushed black.
     float NdotL = clamp(dot(n, uSunDir), 0.0, 1.0);
     float upT = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 fill = uAmbientColor * mix(0.55, 1.0, upT);
-    vec3 lit = albedo * (uSunColor * NdotL * 1.35 + fill);
+    vec3 fill = uAmbientColor * mix(0.78, 1.25, upT);
+    vec3 lit = albedo * (uSunColor * NdotL * 1.55 + fill);
 
-    // Crushed shadow: don't let the darkest fragments fall below a slightly
-    // cool floor, which keeps form readable without the modern soft-GI lift.
-    vec3 shadowFloor = uAmbientColor * 0.55;
+    // Soft shadow floor — keep form readable without crushing to black.
+    vec3 shadowFloor = uAmbientColor * 0.85;
     lit = max(lit, albedo * shadowFloor);
+
+    // Lantern contribution: a local point-light pool tied to the bobcat. We
+    // attenuate quadratically so the falloff has a hard, near-2000s edge.
+    vec3 toLantern = uLanternPos - vWorldPos;
+    float lanternD = length(toLantern);
+    float lanternAtt = clamp(1.0 - lanternD / uLanternRange, 0.0, 1.0);
+    lanternAtt *= lanternAtt;
+    float lanternNdotL = clamp(dot(n, toLantern / max(lanternD, 0.0001)), 0.0, 1.0);
+    lit += albedo * uLanternColor * (lanternNdotL * 0.85 + 0.30) * lanternAtt * uLanternIntensity;
+
+    // Brightness lift on the lit colour (before fog).
+    lit *= uExposure;
 
     // Aerial perspective: exponential extinction with two-stage colour mix.
     // Closer haze is a desaturated cool grey, deep distance is rayleigh-blue.
