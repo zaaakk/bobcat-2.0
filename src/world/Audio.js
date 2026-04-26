@@ -205,17 +205,26 @@ export function createAudio() {
     if (!ctx) return;
 
     // Try real files; whichever load become layered, the rest fall back to synth.
+    // Try mp3 first (drop-in convention); ogg fallback keeps the door open
+    // for higher-quality replacements without forcing a re-export.
+    async function loadFirst(name, urls) {
+      for (const u of urls) {
+        const b = await tryLoad(name, u);
+        if (b) return b;
+      }
+      return null;
+    }
     const loads = await Promise.all([
-      tryLoad('wind', '/assets/audio/wind_open.ogg'),
-      tryLoad('cicadas', '/assets/audio/cicadas_day.ogg'),
-      tryLoad('crickets', '/assets/audio/crickets_night.ogg'),
-      tryLoad('grass', '/assets/audio/grass_rustle.ogg'),
-      tryLoad('fs1', '/assets/audio/footstep_dirt_1.ogg'),
-      tryLoad('fs2', '/assets/audio/footstep_dirt_2.ogg'),
-      tryLoad('fs3', '/assets/audio/footstep_dirt_3.ogg'),
-      tryLoad('coyote', '/assets/audio/coyote_howl_distant.ogg'),
-      tryLoad('hawk', '/assets/audio/hawk_call_distant.ogg'),
-      tryLoad('owl', '/assets/audio/owl_hoot_distant.ogg')
+      loadFirst('wind', ['/assets/audio/wind_open.mp3', '/assets/audio/wind_open.ogg']),
+      loadFirst('cicadas', ['/assets/audio/cicadas_day.mp3', '/assets/audio/cicadas_day.ogg']),
+      loadFirst('crickets', ['/assets/audio/crickets_night.mp3', '/assets/audio/crickets_night.ogg']),
+      loadFirst('grass', ['/assets/audio/grass_rustle.mp3', '/assets/audio/grass_rustle.ogg']),
+      loadFirst('fs1', ['/assets/audio/footstep_dirt_1.mp3', '/assets/audio/footstep_dirt_1.ogg']),
+      loadFirst('fs2', ['/assets/audio/footstep_dirt_2.mp3', '/assets/audio/footstep_dirt_2.ogg']),
+      loadFirst('fs3', ['/assets/audio/footstep_dirt_3.mp3', '/assets/audio/footstep_dirt_3.ogg']),
+      loadFirst('coyote', ['/assets/audio/coyote_howl_distant.mp3', '/assets/audio/coyote_howl_distant.ogg']),
+      loadFirst('hawk', ['/assets/audio/hawk_call_distant.mp3', '/assets/audio/hawk_call_distant.ogg']),
+      loadFirst('owl', ['/assets/audio/owl_hoot_distant.mp3', '/assets/audio/owl_hoot_distant.ogg'])
     ]);
     const [wind, cicadas, crickets, grass, fs1, fs2, fs3, coyote, hawk, owl] = loads;
 
@@ -229,7 +238,7 @@ export function createAudio() {
       outer.gain.value = 0;
       src.connect(outer).connect(master);
       src.start();
-      const peakLevel = 0.16;
+      const peakLevel = 0.22;  // real recording → can sit a touch louder than the synth bed
       function scheduleNext(now) {
         const onDur  = 15 + Math.random() * 30;
         const offDur = 10 + Math.random() * 20;
