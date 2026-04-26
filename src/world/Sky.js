@@ -8,9 +8,9 @@ export function createSky(scene) {
   const geo = new THREE.SphereGeometry(20000, 32, 16);
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      uTopColor:    { value: new THREE.Color(0.34, 0.55, 0.78) },
-      uHorizonColor:{ value: new THREE.Color(0.83, 0.85, 0.86) },
-      uHazeColor:   { value: new THREE.Color(0.92, 0.86, 0.74) },
+      uTopColor:    { value: new THREE.Color('#57b5ff') },
+      uHorizonColor:{ value: new THREE.Color('#94dcff') },
+      uHazeColor:   { value: new THREE.Color('#94dcff') },
       uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
       uSunColor: { value: new THREE.Color(1.0, 0.95, 0.78) }
     },

@@ -52,8 +52,8 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uFogNear: { value: 600.0 },
     uFogMid: { value: 4000.0 },
     uFogFar: { value: 18000.0 },
-    uFogColorNear: { value: new THREE.Color(0.85, 0.82, 0.75) },
-    uFogColorFar: { value: new THREE.Color(0.70, 0.78, 0.86) },
+    uFogColorNear: { value: new THREE.Color('#bcc7d4') },
+    uFogColorFar:  { value: new THREE.Color('#4373b3') },
     uTime: { value: 0 }
   };
 

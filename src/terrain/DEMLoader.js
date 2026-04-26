@@ -82,6 +82,10 @@ function loadImage(src, onProgress) {
   });
 }
 
+/**
+ * Heightmap texture: float-32 single-channel, raw metres. Requires
+ * OES_texture_float_linear for filtering — most desktop GPUs support it.
+ */
 export function heightmapTexture(THREE, dem) {
   const tex = new THREE.DataTexture(
     dem.data, dem.width, dem.height,
@@ -93,6 +97,7 @@ export function heightmapTexture(THREE, dem) {
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
+  tex.userData = { heightOffset: 0, heightScale: 1 };
   return tex;
 }
 

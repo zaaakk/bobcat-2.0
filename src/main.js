@@ -160,6 +160,12 @@ async function main() {
     plants.update(t, camera.position);
 
     hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position });
+    if (typeof window !== 'undefined') {
+      window.__bobcatPos = {
+        bobcat: { x: bobcat.position.x, y: bobcat.position.y, z: bobcat.position.z, yaw: bobcat.yaw },
+        camera: { x: camera.position.x, y: camera.position.y, z: camera.position.z }
+      };
+    }
 
     renderer.render(scene, camera);
 
