@@ -33,7 +33,10 @@ export function createNightVision(renderer) {
     uAspect: { value: 1 },
     uLensCenter: { value: new THREE.Vector2(0.5, 0.5) },
     uLensRadius: { value: 0.22 }, // fraction of min(screen w, h)
-    uLensFeather: { value: 0.10 } // soft edge
+    uLensFeather: { value: 0.10 }, // soft edge
+    uSaturation: { value: 1.0 },   // user grade (1 = no change)
+    uBrightness: { value: 1.0 },   // user grade (1 = no change)
+    uContrast: { value: 1.0 }      // user grade (1 = no change)
   };
 
   const mat = new THREE.ShaderMaterial({
@@ -50,12 +53,24 @@ export function createNightVision(renderer) {
       uniform float uTime, uNight, uAspect;
       uniform vec2 uLensCenter;
       uniform float uLensRadius, uLensFeather;
+      uniform float uSaturation, uBrightness, uContrast;
       varying vec2 vUv;
 
       float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
+      vec3 grade(vec3 c) {
+        // saturation around luma
+        float lum = dot(c, vec3(0.299, 0.587, 0.114));
+        c = mix(vec3(lum), c, uSaturation);
+        // contrast around mid-grey
+        c = (c - 0.5) * uContrast + 0.5;
+        // brightness as a multiplier
+        c *= uBrightness;
+        return c;
+      }
+
       void main() {
-        vec3 src = texture2D(uScene, vUv).rgb;
+        vec3 src = grade(texture2D(uScene, vUv).rgb);
 
         // Scaled UV so the lens reads as a circle, not an ellipse.
         vec2 d = vUv - uLensCenter;

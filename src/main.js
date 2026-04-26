@@ -16,6 +16,7 @@ import { loadBobcat } from './player/Bobcat.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
 import { createHUD, setLoadingProgress, hideLoading } from './ui/HUD.js';
+import { createDebugMenu, panelRow, panelButton } from './ui/DebugMenu.js';
 
 main().catch(err => {
   console.error(err);
@@ -144,6 +145,51 @@ async function main() {
   // current renderer size (the resize handler closure picks it up later).
   nightVision = createNightVision(renderer);
   nightVision.resize(renderer.domElement.width, renderer.domElement.height);
+
+  // ---------- debug menu ----------
+  // Toggle with ` (backtick) or F1. First panel is "Filters" — saturation,
+  // brightness and contrast applied in the night-vision composite, before any
+  // of the lens / vignette effects.
+  createDebugMenu({
+    panels: [
+      {
+        id: 'filters', label: 'Filters',
+        render(el) {
+          panelRow(el, {
+            label: 'Saturation', min: 0, max: 2, step: 0.01,
+            value: nightVision.uniforms.uSaturation.value,
+            onInput: v => nightVision.uniforms.uSaturation.value = v
+          });
+          panelRow(el, {
+            label: 'Brightness', min: 0.4, max: 1.8, step: 0.01,
+            value: nightVision.uniforms.uBrightness.value,
+            onInput: v => nightVision.uniforms.uBrightness.value = v
+          });
+          panelRow(el, {
+            label: 'Contrast', min: 0.6, max: 1.6, step: 0.01,
+            value: nightVision.uniforms.uContrast.value,
+            onInput: v => nightVision.uniforms.uContrast.value = v
+          });
+          panelButton(el, 'Reset', () => {
+            nightVision.uniforms.uSaturation.value = 1.0;
+            nightVision.uniforms.uBrightness.value = 1.0;
+            nightVision.uniforms.uContrast.value = 1.0;
+            // Re-render the panel so the slider thumbs jump back.
+            el.parentElement.querySelector('.dbg-tab.active').click();
+          });
+        }
+      },
+      {
+        id: 'world', label: 'World',
+        render(el) {
+          const intro = document.createElement('div');
+          intro.style.cssText = 'font-size:11px; letter-spacing:0.18em; color:#b9aa8a; text-transform:uppercase; text-shadow:1px 1px 0 #000;';
+          intro.textContent = '(reserved for time-of-day, fog, etc.)';
+          el.appendChild(intro);
+        }
+      }
+    ]
+  });
 
   setLoadingProgress(1.0, 'Ready');
   hideLoading();
