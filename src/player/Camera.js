@@ -1,13 +1,10 @@
 import * as THREE from 'three';
-import { sampleHeight } from '../terrain/DEMLoader.js';
 
 /**
- * Third-person orbit camera. Mouse drag (or hold) rotates around the bobcat.
- * Camera trails the player and gently leads when running.
- *
- * Yaw is exposed so player input can be made camera-relative.
+ * Third-person orbit camera. Mouse drag rotates around the bobcat. `groundY`
+ * is the rendered-terrain sampler — used to keep the camera above the floor.
  */
-export function createThirdPersonCamera({ camera, target, dem, domElement }) {
+export function createThirdPersonCamera({ camera, target, groundY, domElement }) {
   const state = {
     yaw: Math.PI,        // 0 looks north; PI looks south (camera behind cat at start)
     pitch: -0.22,
@@ -61,8 +58,8 @@ export function createThirdPersonCamera({ camera, target, dem, domElement }) {
     tmpCamPos.set(tmpTarget.x + ox, tmpTarget.y + oy, tmpTarget.z + oz);
 
     // keep camera above terrain (don't clip into ground)
-    const groundY = sampleHeight(dem, tmpCamPos.x, tmpCamPos.z) + 0.6;
-    if (tmpCamPos.y < groundY) tmpCamPos.y = groundY;
+    const minY = groundY(tmpCamPos.x, tmpCamPos.z) + 0.6;
+    if (tmpCamPos.y < minY) tmpCamPos.y = minY;
 
     // smooth move
     camera.position.lerp(tmpCamPos, Math.min(1, dt * 8));

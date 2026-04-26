@@ -114,6 +114,38 @@ export function sampleHeight(dem, x, z) {
   return h0 * (1 - fy) + h1 * fy;
 }
 
+/**
+ * Sample the height that the *rendered terrain mesh* shows at (x, z).
+ *
+ * The mesh has a fixed grid of vertices at `vertexSpacing` apart. Each vertex's
+ * y is a bilinear sample of the DEM heightmap. Between vertices, the rasterizer
+ * linearly interpolates those vertex y values — which is *smoother* than a
+ * direct bilinear of the DEM. Plants placed at `sampleHeight` would float or
+ * sink relative to the rendered ground; this sampler matches what the eye sees.
+ */
+export function sampleRenderedHeight(dem, planeSize, segments, x, z) {
+  const halfPlane = planeSize * 0.5;
+  const dx = planeSize / segments;
+  const gx = (x + halfPlane) / dx;
+  const gy = (z + halfPlane) / dx;
+  const ix0 = Math.floor(gx), iy0 = Math.floor(gy);
+  const ix1 = ix0 + 1, iy1 = iy0 + 1;
+  const fx = gx - ix0, fy = gy - iy0;
+
+  // Vertex world coordinates → bilinear-from-DEM sampling.
+  const x0w = ix0 * dx - halfPlane;
+  const x1w = ix1 * dx - halfPlane;
+  const y0w = iy0 * dx - halfPlane;
+  const y1w = iy1 * dx - halfPlane;
+  const h00 = sampleHeight(dem, x0w, y0w);
+  const h10 = sampleHeight(dem, x1w, y0w);
+  const h01 = sampleHeight(dem, x0w, y1w);
+  const h11 = sampleHeight(dem, x1w, y1w);
+  const h0 = h00 * (1 - fx) + h10 * fx;
+  const h1 = h01 * (1 - fx) + h11 * fx;
+  return h0 * (1 - fy) + h1 * fy;
+}
+
 export function sampleSlope(dem, x, z, step = 4) {
   const ds = step * dem.pixelSizeX;
   const hL = sampleHeight(dem, x - ds, z);

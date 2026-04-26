@@ -11,14 +11,18 @@ import { SPECIES } from './species.js';
  */
 export function placeVegetation({
   dem,
+  groundY,               // (x, z) → height that the rendered terrain shows
   cellSize = 5.0,        // metres between candidate samples
-  globalDensity = 0.55,  // 0..1 — fraction of suitable cells that actually spawn
-  jitter = 0.85,
-  playRadius = 5500,     // metres from origin — outside this, no plants are placed
+  globalDensity = 0.55,
+  jitter = 1.0,          // ≥1 lets jitter cross cell boundaries → less grid-y
+  playRadius = 5500,
   maxInstances = 350_000
 }) {
   const noise = createNoise2D(() => 0.71);
   const blueNoise = createNoise2D(() => 0.91);
+  const clusterMacroNoise = createNoise2D(() => 0.27);
+  const clusterMicroNoise = createNoise2D(() => 0.83);
+  const sampleY = groundY || ((x, z) => sampleHeight(dem, x, z));
 
   // Restrict the candidate grid to a square that bounds the play radius. For a
   // 21x21 km DEM with playRadius=5.5km this is ~14% of the area, so candidate
@@ -50,28 +54,38 @@ export function placeVegetation({
       const baseZ = playOriginZ + (j + 0.5) * cellSize;
       if (baseX * baseX + baseZ * baseZ > r2) continue;
 
-      // jitter inside cell using deterministic noise
+      // jitter inside cell — full-cell jitter (jx/jz in roughly [-1,1]) breaks
+      // the grid alignment so plants don't form regular rows.
       const jx = blueNoise(i * 0.31, j * 0.27);
       const jz = blueNoise(i * 0.19 + 7.1, j * 0.23 + 3.7);
-      const x = baseX + jx * cellSize * 0.5 * jitter;
-      const z = baseZ + jz * cellSize * 0.5 * jitter;
+      const x = baseX + jx * cellSize * jitter;
+      const z = baseZ + jz * cellSize * jitter;
 
-      const y = sampleHeight(dem, x, z);
+      // Slope/elev/drainage from the DEM (terrain analysis is unaffected by
+      // the rendered-mesh smoothing — plant Y placement uses sampleY).
       const slope = sampleSlope(dem, x, z);
       const slopeT = Math.min(1, slope / (Math.PI / 2));
-      const elevT = (y - dem.minZ) / elevRange;
+      const yDem = sampleHeight(dem, x, z);
+      const elevT = (yDem - dem.minZ) / elevRange;
 
-      // drainage = local concavity
       const ds = 8 * dem.pixelSizeX;
       const hL = sampleHeight(dem, x - ds, z);
       const hR = sampleHeight(dem, x + ds, z);
       const hD = sampleHeight(dem, x, z - ds);
       const hU = sampleHeight(dem, x, z + ds);
-      const concav = (hL + hR + hD + hU) * 0.25 - y;
+      const concav = (hL + hR + hD + hU) * 0.25 - yDem;
       const drainage = Math.max(0, Math.min(1, concav / 4 + (0.3 - elevT) * 0.6));
 
-      // Macro habitat noise so a region biases to one community.
       const macro = (noise(x * 0.0008, z * 0.0008) + 1) * 0.5;
+
+      // Clumping mask: long-wavelength carves out genuinely bare patches,
+      // short-wavelength gives texture inside the dense regions. Stays in
+      // [0..1] so it never forces 100% acceptance.
+      const cMacro = (clusterMacroNoise(x * 0.0014, z * 0.0014) + 1) * 0.5;
+      const cMicro = (clusterMicroNoise(x * 0.012, z * 0.012) + 1) * 0.5;
+      const macroGate = 0.18 + Math.max(0, cMacro - 0.25) * 1.1;  // 0.18..0.99
+      const microFill = 0.30 + 0.70 * cMicro;                      // 0.30..1.00
+      const clusterMask = Math.min(1, macroGate * microFill);
 
       // Compute per-species suitability and aggregate density.
       let sumP = 0;
@@ -82,9 +96,9 @@ export function placeVegetation({
         sumP += speciesProbs[k];
       }
 
-      // Acceptance roll — analogous to Poisson density.
       const rand = (blueNoise(i * 1.13 + 5.0, j * 1.07 + 9.0) + 1) * 0.5;
-      const accept = sumP * globalDensity;
+      const baseAccept = Math.min(1.0, sumP * globalDensity);
+      const accept = baseAccept * clusterMask;
       if (rand > accept) continue;
 
       // Pick species weighted by suit.
@@ -101,7 +115,7 @@ export function placeVegetation({
       const rot = ((blueNoise(i * 0.33 + 17.0, j * 0.41 + 19.0) + 1) * Math.PI);
 
       positions[n * 3 + 0] = x;
-      positions[n * 3 + 1] = y;
+      positions[n * 3 + 1] = sampleY(x, z);
       positions[n * 3 + 2] = z;
       scales[n] = h;
       rotations[n] = rot;
@@ -118,3 +132,4 @@ export function placeVegetation({
     count: n
   };
 }
+

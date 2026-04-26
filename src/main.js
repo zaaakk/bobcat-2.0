@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-import { loadDEM, heightmapTexture, sampleHeight } from './terrain/DEMLoader.js';
+import { loadDEM, heightmapTexture, sampleHeight, sampleRenderedHeight } from './terrain/DEMLoader.js';
 import { generateSplatMap } from './terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from './terrain/TerrainMesh.js';
 
@@ -76,14 +76,21 @@ async function main() {
   ]);
 
   setLoadingProgress(0.55, 'Building terrain mesh…');
+  // Vertex spacing should be close to the DEM pixel size (~16.5 m) so plants
+  // and the bobcat sit on the same surface the rasterizer draws.
+  const terrainSegments = 1024;
+  const terrainEdgePadding = 7000;
+  const terrainPlaneSize = dem.worldWidth + terrainEdgePadding * 2;
   const terrain = createTerrainMesh({
     dem, heightTex, splatTex,
     groundTextures: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
     normalTex: tNormal,
-    segments: 512,
-    edgePadding: 9000
+    segments: terrainSegments,
+    edgePadding: terrainEdgePadding
   });
   scene.add(terrain.mesh);
+
+  const groundY = (x, z) => sampleRenderedHeight(dem, terrainPlaneSize, terrainSegments, x, z);
 
   // ---------- vegetation ----------
   setLoadingProgress(0.65, 'Loading flora…');
@@ -92,10 +99,11 @@ async function main() {
   setLoadingProgress(0.75, 'Placing vegetation…');
   const instances = placeVegetation({
     dem,
-    cellSize: 7.0,
-    globalDensity: 0.40,
+    groundY,
+    cellSize: 5.0,
+    globalDensity: 1.2,
     playRadius: 3500,
-    maxInstances: 500_000
+    maxInstances: 700_000
   });
   console.log(`placed ${instances.count} plant instances`);
 
@@ -108,12 +116,13 @@ async function main() {
     onProgress: t => setLoadingProgress(0.88 + t * 0.10, 'Waking bobcat…')
   });
   // Spawn at DEM centre, on the ground.
-  bobcat.position.set(0, sampleHeight(dem, 0, 0), 0);
+  bobcat.position.set(0, groundY(0, 0), 0);
   bobcat.yaw = 0;
   bobcat.pivot.rotation.y = 0;
   scene.add(bobcat.object);
 
-  const cam = createThirdPersonCamera({ camera, target: bobcat, dem, domElement: renderer.domElement });
+  bobcat.setGroundFn(groundY);
+  const cam = createThirdPersonCamera({ camera, target: bobcat, groundY, domElement: renderer.domElement });
   const input = createInput();
 
   const hud = createHUD({ dem });

@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { sampleHeight } from '../terrain/DEMLoader.js';
 
 /**
  * Loads the bobcat GLB and exposes a controller that walks/runs the cat across
@@ -53,22 +52,22 @@ function buildController(gltf) {
     if (first) { first.play(); first.setLoop(THREE.LoopRepeat); }
   }
 
-  // Movement state
+  let groundFn = (x, z) => 0;
+
   const state = {
     object: pivot,
     pivot,
     position: pivot.position,
     velocity: new THREE.Vector3(),
     forward: new THREE.Vector3(0, 0, 1),
-    yaw: 0,            // facing direction (radians); 0 = +Z (north)
+    yaw: 0,
     speed: 0,
-    walkSpeed: 3.2,    // m/s
+    walkSpeed: 3.2,
     runSpeed: 7.4,
     mixer,
-    actions
+    actions,
+    setGroundFn(fn) { groundFn = fn; }
   };
-
-  function setHeight(dem) { state.position.y = sampleHeight(dem, state.position.x, state.position.z); }
 
   function update(dt, inputs, dem) {
     // Camera-relative motion: WASD relative to the camera yaw provided in inputs.cameraYaw.
@@ -97,7 +96,7 @@ function buildController(gltf) {
     state.position.x = Math.max(-halfW, Math.min(halfW, state.position.x));
     state.position.z = Math.max(-halfH, Math.min(halfH, state.position.z));
 
-    state.position.y = sampleHeight(dem, state.position.x, state.position.z);
+    state.position.y = groundFn(state.position.x, state.position.z);
 
     pivot.rotation.y = state.yaw;
 
@@ -108,7 +107,7 @@ function buildController(gltf) {
     }
   }
 
-  return { ...state, update, setHeight };
+  return { ...state, update };
 }
 
 function lerpAngle(a, b, t) {
