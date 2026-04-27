@@ -87,14 +87,27 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
 
   /**
    * Move the patch to centre on (x, z). Call once per frame with the
-   * bobcat's (or camera's) ground position. The vertex shader uses
-   * uPatchCenter (in world XZ) for both height-sampling neighbours and
-   * the edge-fade calculation, so we update it in lockstep with mesh
-   * position.
+   * bobcat's (or camera's) ground position.
+   *
+   * **Grid-snap**: we round (x, z) to multiples of the patch's vertex
+   * spacing before placing the mesh. Without this, every vertex in the
+   * patch sees a slightly different world XZ each frame as the cat moves
+   * smoothly, the heightmap samples shift, and the rendered surface
+   * "wobbles like jello" between frames. With it, vertices are pinned to
+   * fixed world cells; the patch only jumps when the cat crosses a cell
+   * boundary, and that jump is one-vertex-wide so it's invisible at
+   * typical viewing distance. (This is the "clipmap" anchor trick used
+   * in every large-terrain engine.)
+   *
+   * The vertex shader uses uPatchCenter for both height-sampling
+   * neighbours and the edge-fade calculation, so we update it in lockstep
+   * with mesh.position to keep them aligned.
    */
   function update(x, z) {
-    mesh.position.set(x, 0, z);
-    uniforms.uPatchCenter.value.set(x, z);
+    const sx = Math.round(x / patchSpacing) * patchSpacing;
+    const sz = Math.round(z / patchSpacing) * patchSpacing;
+    mesh.position.set(sx, 0, sz);
+    uniforms.uPatchCenter.value.set(sx, sz);
   }
 
   return { mesh, material, update };
