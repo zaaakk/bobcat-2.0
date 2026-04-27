@@ -101,12 +101,43 @@ export class TerrainQuery {
   sampleDetail(x, z) {
     const dn = this.detailNoise;
     if (!dn) return 0;
+    // Broad layer (world-aligned ridged FBM + bedding pulse).
     const ridge = this._sampleRidge01(x, z);
     const baseDem = this._sampleDemHeight(x, z);
     const warpedH = baseDem + ridge * dn.bedWarpAmp;
     const bedTau = 6.283185307179586 / dn.bedPeriod;
     const pulse = Math.max(0, Math.sin(warpedH * bedTau) - 0.5) * 2;
-    return ridge * dn.ridgeAmp + pulse * dn.bedAmp;
+    // Fine layer (tile-wrapped FBM in [-1, 1]).
+    const fine = dn.fine ? this._sampleFineTile(x, z) : 0;
+    const fineAmp = dn.fine ? dn.fine.amp : 0;
+    return ridge * dn.ridgeAmp + pulse * dn.bedAmp + fine * fineAmp;
+  }
+
+  /**
+   * Bilinear lookup of the fine-tile texture in [-1, 1], with repeat wrap.
+   * Mirrors the GPU's RepeatWrapping + LinearFilter combination.
+   */
+  _sampleFineTile(x, z) {
+    const fine = this.detailNoise.fine;
+    const src = fine.renderData;
+    const W = fine.width, H = fine.height;
+    // GPU: uv = worldXZ / tileSize, then texel idx = uv * W - 0.5
+    const fu = (x / fine.tileSize) * W - 0.5;
+    const fv = (z / fine.tileSize) * H - 0.5;
+    const x0 = Math.floor(fu), y0 = Math.floor(fv);
+    const fx = fu - x0, fy = fv - y0;
+    // Repeat wrap (handles negatives via the (% + W) % W idiom).
+    const wx0 = ((x0 % W) + W) % W;
+    const wx1 = ((x0 + 1) % W + W) % W;
+    const wy0 = ((y0 % H) + H) % H;
+    const wy1 = ((y0 + 1) % H + H) % H;
+    const h00 = src[wy0 * W + wx0];
+    const h10 = src[wy0 * W + wx1];
+    const h01 = src[wy1 * W + wx0];
+    const h11 = src[wy1 * W + wx1];
+    const h0 = h00 * (1 - fx) + h10 * fx;
+    const h1 = h01 * (1 - fx) + h11 * fx;
+    return h0 * (1 - fy) + h1 * fy;
   }
 
   /** Bilinear lookup of the ridged FBM texture in [0, 1]. */

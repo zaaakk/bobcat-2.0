@@ -54,6 +54,24 @@ export function generateDetailNoise({
   bedAmp         = 2.0,    // metres of bedding-plane bench lift
   bedPeriod      = 18.0,   // metres between bedding planes vertically
   bedWarpAmp     = 6.0,    // metres of wander on the bedding lines
+  // ── Fine-tile layer ─────────────────────────────────────────────────
+  // The broad layer is sampled across the whole world; its texture
+  // resolution caps the finest visible feature at ~world/(res*0.5). At
+  // 21km / (2048*0.5) ≈ 20m, that's *exactly* the "20-40 feet between
+  // vertices" feel even though the patch vertex spacing is 0.59m.
+  //
+  // Fix: a small noise texture that *tiles* every fineTileSize metres of
+  // world, captured at fineRes texels per tile. This gives effectively
+  // sub-meter features (fineTileSize / fineRes texels per cycle) without
+  // the memory cost of a giant world-aligned texture. Only the high-res
+  // patch can resolve these wavelengths; the base mesh interpolates over
+  // them harmlessly (same texture, same world coords, both meshes see
+  // the same surface so there's no seam).
+  fineRes        = 256,    // texels per tile
+  fineTileSize   = 8.0,    // metres of world per tile repeat → 0.03m/texel
+  fineOctaves    = 4,      // FBM octaves baked into the tile
+  fineAmp        = 0.45,   // metres peak displacement (signed)
+  fineSeed       = 0.911,
   seed           = 0.137,
 } = {}) {
   const noise = createNoise2D(() => seed);
@@ -115,6 +133,14 @@ export function generateDetailNoise({
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
 
+  // ── Fine-tile FBM ────────────────────────────────────────────────────
+  // Smooth (not ridged) FBM in [-1, 1], baked once and tiled across the
+  // world. Wraps repeat-style so the tile boundaries don't clamp to a
+  // fixed value — natural continuity at the seams.
+  const fine = bakeFineTile({
+    res: fineRes, octaves: fineOctaves, lacunarity, gain, seed: fineSeed,
+  });
+
   return {
     data,
     renderData,
@@ -127,5 +153,73 @@ export function generateDetailNoise({
     bedPeriod,
     bedWarpAmp,
     texture,
+    fine: {
+      ...fine,
+      tileSize: fineTileSize,
+      amp: fineAmp,
+    }
   };
+}
+
+/**
+ * Tileable FBM in [-1, 1]. Uses a periodic simplex sample by trigonometric
+ * domain wrap — sample the noise on a torus parameterisation so the
+ * texture wraps cleanly at the boundary. Cheap to bake at small sizes.
+ */
+function bakeFineTile({ res, octaves, lacunarity, gain, seed }) {
+  const noise = createNoise2D(() => seed);
+  const w = res, h = res;
+  const data = new Float32Array(w * h);
+
+  // Normalisation factor so summed FBM output is in [-1, 1].
+  let norm = 0;
+  for (let o = 0; o < octaves; o++) norm += Math.pow(gain, o);
+  const inv = 1 / norm;
+
+  // Toroidal wrap: sample noise on a 2D torus so the texture tiles
+  // perfectly. We do that by mapping (i, j) → angles (αi, αj) and
+  // sampling the noise function at (cos α, sin α) for both axes —
+  // the noise field on a torus surface wraps trivially.
+  for (let j = 0; j < h; j++) {
+    const aj = (j / h) * Math.PI * 2;
+    const cj = Math.cos(aj), sj = Math.sin(aj);
+    for (let i = 0; i < w; i++) {
+      const ai = (i / w) * Math.PI * 2;
+      const ci = Math.cos(ai), si = Math.sin(ai);
+      let v = 0, freq = 1.0, amp = 1.0;
+      for (let o = 0; o < octaves; o++) {
+        // 2D simplex on a 4D-projected torus — we feed a 2D noise function
+        // varying inputs that come from 4 phase-locked angles. The trick:
+        // each octave uses different multipliers to break symmetry but
+        // stays periodic in (i, j). Cheap and good enough for tile FBM.
+        const x = ci * freq + sj * (freq * 0.31);
+        const y = si * freq + cj * (freq * 0.27);
+        v += noise(x * 1.7, y * 1.7) * amp;
+        freq *= lacunarity;
+        amp *= gain;
+      }
+      data[j * w + i] = v * inv;
+    }
+  }
+
+  const halfData = new Uint16Array(data.length);
+  const renderData = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    const hf = THREE.DataUtils.toHalfFloat(data[i]);
+    halfData[i] = hf;
+    renderData[i] = THREE.DataUtils.fromHalfFloat(hf);
+  }
+
+  const texture = new THREE.DataTexture(
+    halfData, w, h,
+    THREE.RedFormat, THREE.HalfFloatType
+  );
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+
+  return { data, renderData, width: w, height: h, texture };
 }

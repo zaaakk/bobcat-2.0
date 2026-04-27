@@ -225,11 +225,23 @@ async function main() {
             value: u.uBedWarpAmp.value,
             onInput: v => u.uBedWarpAmp.value = v,
           });
+          panelRow(el, {
+            label: 'Fine amp (m)', min: 0, max: 2.5, step: 0.01,
+            value: u.uFineAmp.value,
+            onInput: v => u.uFineAmp.value = v,
+          });
+          panelRow(el, {
+            label: 'Fine tile (m)', min: 1, max: 40, step: 0.5,
+            value: u.uFineTileSize.value,
+            onInput: v => u.uFineTileSize.value = v,
+          });
           panelButton(el, 'Reset', () => {
             u.uRidgeAmp.value = 3.0;
             u.uBedAmp.value = 2.0;
             u.uBedPeriod.value = 18.0;
             u.uBedWarpAmp.value = 6.0;
+            u.uFineAmp.value = 0.45;
+            u.uFineTileSize.value = 8.0;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           // Note: TerrainQuery still uses the bake-time defaults for CPU

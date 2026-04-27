@@ -62,6 +62,12 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uBedPeriod:        { value: detailNoise ? detailNoise.bedPeriod  : 18.0 },
     uBedWarpAmp:       { value: detailNoise ? detailNoise.bedWarpAmp : 0.0 },
     uDetailHas:        { value: detailNoise ? 1.0 : 0.0 },
+    // Fine-tile detail: a small repeating noise texture sampled at world
+    // coords / tileSize. Captures sub-meter features the broad world-aligned
+    // texture can't represent (its 2048² over 21km caps at ~10m features).
+    uFineTex:          { value: detailNoise && detailNoise.fine ? detailNoise.fine.texture : heightTex },
+    uFineTileSize:     { value: detailNoise && detailNoise.fine ? detailNoise.fine.tileSize : 1.0 },
+    uFineAmp:          { value: detailNoise && detailNoise.fine ? detailNoise.fine.amp     : 0.0 },
     // Detail-patch parameters: only consumed when IS_PATCH is defined
     // (see DetailPatch.js). Live in the shared uniforms block so the patch
     // and base material can use a single object.
@@ -87,6 +93,7 @@ export const TERRAIN_VERT = /* glsl */`
   precision highp float;
   uniform sampler2D uHeightmap;
   uniform sampler2D uDetailTex;
+  uniform sampler2D uFineTex;
   uniform vec2 uDemSize;
   uniform vec2 uDetailWorldSize;
   uniform vec2 uPlaneSize;
@@ -97,6 +104,8 @@ export const TERRAIN_VERT = /* glsl */`
   uniform float uBedPeriod;
   uniform float uBedWarpAmp;
   uniform float uDetailHas;
+  uniform float uFineTileSize;
+  uniform float uFineAmp;
   uniform float uPatchHalfSize;
 
   varying vec3 vWorldPos;
@@ -118,13 +127,17 @@ export const TERRAIN_VERT = /* glsl */`
   //                                       field so they wander naturally)
   float sampleDetail(vec2 worldXZ, float hDem) {
     if (uDetailHas < 0.5) return 0.0;
+    // Broad layer: world-aligned ridged FBM in [0, 1] + bedding pulse.
     vec2 uv = (worldXZ / uDetailWorldSize) + 0.5;
     uv = clamp(uv, vec2(0.0), vec2(1.0));
-    float ridge = texture2D(uDetailTex, uv).r;             // [0, 1]
+    float ridge = texture2D(uDetailTex, uv).r;
     float warpedH = hDem + ridge * uBedWarpAmp;
     float bedTau  = 6.283185307179586 / uBedPeriod;
     float pulse   = max(0.0, sin(warpedH * bedTau) - 0.5) * 2.0;
-    return ridge * uRidgeAmp + pulse * uBedAmp;
+    // Fine layer: tile-wrapped FBM in [-1, 1] giving sub-metre bumps that
+    // the broad texture can't resolve. RepeatWrapping handles the wrap.
+    float fine = texture2D(uFineTex, worldXZ / uFineTileSize).r;
+    return ridge * uRidgeAmp + pulse * uBedAmp + fine * uFineAmp;
   }
 
   // Detail-fade multiplier — keeps the detail patch (a 256-segment mesh
