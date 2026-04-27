@@ -240,8 +240,8 @@ async function main() {
             u.uBedAmp.value = 2.0;
             u.uBedPeriod.value = 18.0;
             u.uBedWarpAmp.value = 6.0;
-            u.uFineAmp.value = 0.45;
-            u.uFineTileSize.value = 8.0;
+            u.uFineAmp.value = 0.7;
+            u.uFineTileSize.value = 4.0;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           // Note: TerrainQuery still uses the bake-time defaults for CPU

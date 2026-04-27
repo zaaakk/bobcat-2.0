@@ -11,19 +11,24 @@ import { TERRAIN_VERT, TERRAIN_FRAG } from './TerrainMesh.js';
  * whole world; instead we draw a small patch around the camera/cat.
  *
  *   size       150m × 150m around the cat
- *   resolution 256 segments → 0.59m vertex spacing
- *   cost       ~65k extra vertices (vs 1.6M base) — ~4% overhead
+ *   resolution 512 segments → 0.29m vertex spacing (Nyquist ≈ 0.6m features)
+ *   cost       ~262k extra vertices (vs 1.6M base) — ~16% overhead
  *   surface    same height function as the base mesh, so the patch is
  *              co-planar with it. Detail-noise contribution fades to 0
  *              over the outer 15% of the patch so the seam where it meets
  *              the base mesh has no height discontinuity.
+ *
+ * Why 512: at 256 segments (0.59m spacing) the vertex grid was the
+ * resolution bottleneck — even with sub-metre noise the geometry could
+ * only express features ≥1.2m. Doubling segments halves the smallest
+ * resolvable feature.
  *
  * Shares the terrain's uniforms object — env updates, lighting, fog all
  * stay in lockstep with the base mesh automatically. The patch material
  * adds `IS_PATCH` so the shader's `patchDetailFade()` activates and
  * `uPatchCenter` gets read.
  */
-export function createDetailPatch({ terrain, size = 150, resolution = 256 }) {
+export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
   const geometry = new THREE.PlaneGeometry(size, size, resolution, resolution);
   geometry.rotateX(-Math.PI / 2);
 

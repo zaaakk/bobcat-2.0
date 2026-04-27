@@ -68,9 +68,9 @@ export function generateDetailNoise({
   // them harmlessly (same texture, same world coords, both meshes see
   // the same surface so there's no seam).
   fineRes        = 256,    // texels per tile
-  fineTileSize   = 8.0,    // metres of world per tile repeat → 0.03m/texel
+  fineTileSize   = 4.0,    // metres of world per tile repeat → 0.016m/texel
   fineOctaves    = 4,      // FBM octaves baked into the tile
-  fineAmp        = 0.45,   // metres peak displacement (signed)
+  fineAmp        = 0.7,    // metres peak displacement (signed)
   fineSeed       = 0.911,
   seed           = 0.137,
 } = {}) {
