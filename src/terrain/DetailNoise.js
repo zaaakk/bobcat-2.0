@@ -50,10 +50,10 @@ export function generateDetailNoise({
   octaves        = 3,
   lacunarity     = 2.0,
   gain           = 0.5,
-  ridgeAmp       = 3.0,    // metres of caprock-style ridge displacement
-  bedAmp         = 2.3,    // metres of bedding-plane bench lift
+  ridgeAmp       = 2.1,    // metres of caprock-style ridge displacement
+  bedAmp         = 1.6,    // metres of bedding-plane bench lift
   bedPeriod      = 20.0,   // metres between bedding planes vertically
-  bedWarpAmp     = 20.7,   // metres of wander on the bedding lines
+  bedWarpAmp     = 14.0,   // metres of wander on the bedding lines
   // ── Fine-tile layer ─────────────────────────────────────────────────
   // The broad layer is sampled across the whole world; its texture
   // resolution caps the finest visible feature at ~world/(res*0.5). At
@@ -70,7 +70,7 @@ export function generateDetailNoise({
   fineRes        = 256,    // texels per tile
   fineTileSize   = 16.0,   // metres of world per tile repeat → 0.06m/texel
   fineOctaves    = 4,      // FBM octaves baked into the tile
-  fineAmp        = 0.37,   // metres peak displacement (signed)
+  fineAmp        = 0.25,   // metres peak displacement (signed)
   fineSeed       = 0.911,
   seed           = 0.137,
 } = {}) {

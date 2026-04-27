@@ -236,11 +236,11 @@ async function main() {
             onInput: v => u.uFineTileSize.value = v,
           });
           panelButton(el, 'Reset', () => {
-            u.uRidgeAmp.value = 3.0;
-            u.uBedAmp.value = 2.3;
+            u.uRidgeAmp.value = 2.1;
+            u.uBedAmp.value = 1.6;
             u.uBedPeriod.value = 20.0;
-            u.uBedWarpAmp.value = 20.7;
-            u.uFineAmp.value = 0.37;
+            u.uBedWarpAmp.value = 14.0;
+            u.uFineAmp.value = 0.25;
             u.uFineTileSize.value = 16.0;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });

@@ -248,6 +248,8 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform vec3 uLanternColor;
   uniform float uLanternRange;
   uniform float uLanternIntensity;
+  uniform vec2 uPatchCenter;
+  uniform float uPatchHalfSize;
   varying vec3 vWorldPos;
   varying vec2 vUv;
   varying vec2 vDemUv;
@@ -258,6 +260,19 @@ export const TERRAIN_FRAG = /* glsl */`
 
   void main() {
     vec2 worldXZ = vWorldPos.xz;
+    // Where the high-res patch covers this region, defer to it. The patch's
+    // surface follows the noise at 0.29m vertex spacing; the base mesh only
+    // resolves it at 26m, so in concave-down areas the base mesh chord can
+    // be ABOVE the patch's surface — leaving the cat (correctly grounded on
+    // the patch) appearing to sink below the base mesh's drawn ground. The
+    // patch material has IS_PATCH defined so it draws normally; the base
+    // mesh discards inside the patch's coverage and lets the patch fill it.
+    #ifndef IS_PATCH
+      vec2 patchLocal = worldXZ - uPatchCenter;
+      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize) {
+        discard;
+      }
+    #endif
     // Two scales of tiling, blended so close-up texture detail isn't a single
     // monotonous repeat. The far scale masks the wrap seam.
     vec2 tileUv = worldXZ / uTextureScale;
