@@ -32,10 +32,31 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
   const geometry = new THREE.PlaneGeometry(size, size, resolution, resolution);
   geometry.rotateX(-Math.PI / 2);
 
-  // Drive the patch from the same uniforms object the base mesh uses, so
-  // every env-driven update (sunDir, fog, lantern, etc.) reaches both.
-  const uniforms = terrain.uniforms;
-  uniforms.uPatchHalfSize.value = size * 0.5;
+  // Patch uniforms: shallow-copy the base's so env/sun/fog updates reach
+  // both materials through the same `{ value: ... }` wrapper objects, but
+  // OVERRIDE the entries that must differ per material:
+  //
+  //   uMeshSpacing — used by the vertex shader's finite-difference normal
+  //                  computation. The base mesh's spacing (~26m) was being
+  //                  reused here; result: patch geometry had fine detail
+  //                  but its *lighting* averaged that detail over a 52m
+  //                  window — the "low-poly look" feel. Setting this to
+  //                  the patch's actual spacing makes normals capture the
+  //                  fine bumps so the surface lights as bumpy as it is.
+  //
+  //   uPatchHalfSize — sized to this specific patch's extent so
+  //                    patchDetailFade() ramps over the right region.
+  //
+  // uPatchCenter is shared by reference because update() writes to it and
+  // both the base mesh's `IS_PATCH 0` path and the patch's `IS_PATCH 1`
+  // path will see the latest value (only the patch shader actually reads
+  // it, but having one source of truth is cleaner).
+  const patchSpacing = size / resolution;
+  const uniforms = {
+    ...terrain.uniforms,
+    uMeshSpacing:   { value: new THREE.Vector2(patchSpacing, patchSpacing) },
+    uPatchHalfSize: { value: size * 0.5 },
+  };
 
   const material = new THREE.ShaderMaterial({
     uniforms,
