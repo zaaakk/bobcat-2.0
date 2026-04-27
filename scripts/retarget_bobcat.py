@@ -18,6 +18,11 @@ ROOT = "/Users/Zak/Documents/bobcat-2.0"
 PUG_BLEND = os.path.join(ROOT, "Farm Animals Animated  by Quaternius/Blends/Pug.blend")
 BOBCAT_GLB = os.path.join(ROOT, "public/assets/bobcat.glb")
 OUT_GLB = os.path.join(ROOT, "public/assets/bobcat.glb")
+# Save the bound, weighted, animated scene as a .blend too, so the artist
+# (you) can open it in Blender, tweak weights / refine bones, then re-export
+# without re-running this script. The script over-writes it each run, so any
+# manual edits should be saved under a different filename.
+OUT_BLEND = os.path.join(ROOT, "bobcat_rigged.blend")
 
 # ---------- context (headless View3D override) ----------
 bpy.ops.wm.open_mainfile(filepath=PUG_BLEND)
@@ -59,6 +64,12 @@ def apply_xforms(obj, location=True, rotation=True, scale=True):
 # ---------- start ----------
 arm = bpy.data.objects['Armature']
 pug = bpy.data.objects['Pug']
+
+# Snapshot the Pug's actions before we import anything so we can cull stray
+# actions later. (Re-running this script reads its own previous output as the
+# bobcat GLB, which carries an armature + 6 actions of its own — those would
+# get appended to the NLA list as 'Idle_Armature.001' etc. and bloat the GLB.)
+pug_action_names = {a.name for a in bpy.data.actions}
 
 # Apply armature scale so bones are at world units.
 apply_xforms(arm)
@@ -182,6 +193,41 @@ with in_v3d():
 weighted = sum(1 for v in body.data.vertices if any(g.weight > 0 for g in v.groups))
 print(f"weighted_verts after transfer: {weighted} / {len(body.data.vertices)}")
 
+# ---------- weight cleanup ----------
+# Pure proximity transfer leaves verts with up to N influences and noisy edges
+# along bone-region boundaries — that's what makes the limbs go "spaghetti"
+# during a walk cycle: a single belly vert ends up tugged by both a hip bone
+# AND a torso bone with comparable weights, so as the hip rotates it shears
+# the belly geometry. Three passes here:
+#   1. Limit each vert to its top 4 bone influences (glTF caps at 4 anyway, so
+#      anything beyond is dropped at export — better to control which 4 stay).
+#   2. Smooth weights along the surface so neighbouring verts don't have
+#      wildly different blends; this is what kills the visible shearing.
+#   3. Normalize so weights sum to 1 per vert (Blender doesn't enforce this
+#      after limit/smooth).
+print("cleaning up transferred weights ...")
+with in_v3d():
+    bpy.ops.object.select_all(action='DESELECT')
+    body.select_set(True)
+    bpy.context.view_layer.objects.active = body
+
+    # Need to be in WEIGHT_PAINT mode for vertex_group_smooth to behave
+    # consistently on the deform groups; vertex_group_limit_total works in
+    # OBJECT mode.
+    bpy.ops.object.vertex_group_limit_total(group_select_mode='ALL', limit=4)
+
+    bpy.ops.object.mode_set(mode='WEIGHT_PAINT')
+    # Two moderate passes — one strong pass tends to bleed weights too far,
+    # while two of factor=0.5 smooth out the per-face transfer banding while
+    # preserving the limb regions. expand=0 keeps the smoothed area from
+    # growing into untouched verts.
+    bpy.ops.object.vertex_group_smooth(group_select_mode='ALL', factor=0.5, repeat=2, expand=0.0)
+    bpy.ops.object.vertex_group_normalize_all(group_select_mode='ALL', lock_active=False)
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+weighted = sum(1 for v in body.data.vertices if any(g.weight > 0 for g in v.groups))
+print(f"weighted_verts after cleanup: {weighted} / {len(body.data.vertices)}")
+
 # ---------- bind to armature ----------
 # Add an Armature modifier (don't use parent_set — it'd run auto-weights again
 # and we already have transferred weights).
@@ -198,6 +244,15 @@ with in_v3d():
     bpy.context.view_layer.objects.active = pug
     bpy.ops.object.delete()
 
+# ---------- prune stray actions ----------
+# Drop anything that wasn't in the original Pug blend (i.e. came along with
+# the previously-rigged bobcat GLB). Their fcurves point at the just-deleted
+# imported armature anyway and they'd just bloat the export.
+for act in list(bpy.data.actions):
+    if act.name not in pug_action_names:
+        print(f"  pruning stray action: {act.name}")
+        bpy.data.actions.remove(act)
+
 # ---------- one NLA track per action ----------
 ad = arm.animation_data_create()
 ad.action = None
@@ -208,6 +263,12 @@ for action in bpy.data.actions:
     tr.name = action.name
     tr.strips.new(action.name, int(action.frame_range[0]), action)
 print(f"NLA tracks: {[t.name for t in ad.nla_tracks]}")
+
+# ---------- save .blend for manual weight tweaking ----------
+# Save *before* export so the saved scene mirrors what gets exported. If the
+# artist later edits weights and re-exports, they'll get the same NLA layout.
+print(f"saving editable scene → {OUT_BLEND}")
+bpy.ops.wm.save_as_mainfile(filepath=OUT_BLEND, check_existing=False, copy=True)
 
 # ---------- export ----------
 print(f"exporting → {OUT_GLB}")

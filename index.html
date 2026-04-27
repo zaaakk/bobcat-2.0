@@ -154,12 +154,35 @@
         overflow: hidden;
         image-rendering: pixelated;
       }
-      #minimap canvas { width: 100%; height: 100%; image-rendering: pixelated; }
+      /* Pan layer holds the hillshade canvas AND water-pool dots; HUD.js
+         translates it each frame so the bobcat sits at the minimap centre.
+         Sized larger than the visible #minimap → only a window of the world
+         shows at any time. */
+      #minimap-pan {
+        position: absolute; left: 0; top: 0;
+        will-change: transform;
+      }
+      #minimap canvas { display: block; image-rendering: pixelated; }
+      .minimap-water {
+        position: absolute;
+        background: #4ea3c8;
+        border: 1px solid #16384b;
+        border-radius: 50%;
+        pointer-events: none;
+      }
+      /* Player arrow — points in the direction the bobcat is facing. The
+         triangle is drawn via clip-path so we get clean angular borders;
+         JS sets `--yaw` each frame and the transform composes the centre
+         offset with that rotation. */
       #minimap-marker {
-        position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+        position: absolute; top: 50%; left: 50%;
+        width: 14px; height: 14px;
         background: var(--ui-red);
-        border: 2px solid var(--ui-ink);
-        transform: translate(-50%, -50%) rotate(45deg);
+        clip-path: polygon(50% 0%, 100% 100%, 50% 78%, 0% 100%);
+        filter: drop-shadow(0 0 1px var(--ui-ink)) drop-shadow(0 0 1px var(--ui-ink));
+        transform: translate(-50%, -50%) rotate(0rad);
+        transform-origin: center center;
+        z-index: 2;
       }
 
       /* Help block — solid panel, blocky monospaced labels */
@@ -230,7 +253,9 @@
       <div id="portrait-sub">Pandale, Val Verde Co.</div>
       <div id="portrait-coords">N 30.16°  W 101.56°</div>
       <div id="minimap">
-        <canvas width="320" height="320"></canvas>
+        <div id="minimap-pan">
+          <canvas width="640" height="640"></canvas>
+        </div>
         <div id="minimap-marker"></div>
       </div>
     </div>

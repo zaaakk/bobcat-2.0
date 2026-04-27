@@ -7,7 +7,7 @@ import * as THREE from 'three';
  * Vertex grid is fixed (segments x segments); the heightmap texture is sampled in
  * the vertex shader. Splatmap blends four ground textures in the fragment shader.
  */
-export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, normalTex, segments = 512, edgePadding = 8000 }) {
+export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, groundNormals, normalTex, segments = 512, edgePadding = 8000 }) {
   const planeWidth = dem.worldWidth + edgePadding * 2;
   const planeHeight = dem.worldHeight + edgePadding * 2;
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, segments, segments);
@@ -20,7 +20,13 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uTexGrass: { value: groundTextures.grass },
     uTexGravel: { value: groundTextures.gravel },
     uTexSand: { value: groundTextures.sand },
-    uNormal: { value: normalTex },
+    // Per-tile normal maps (sliced from each [tex]normals.png 2×2 atlas).
+    // These replace the single generic detail-normal in the splat blend, so
+    // each ground type's surface micro-detail follows its own diffuse pattern.
+    uNormalRock:   { value: groundNormals?.rock   || normalTex },
+    uNormalGrass:  { value: groundNormals?.grass  || normalTex },
+    uNormalGravel: { value: groundNormals?.gravel || normalTex },
+    uNormalSand:   { value: groundNormals?.sand   || normalTex },
     uMinZ: { value: dem.minZ },
     uMaxZ: { value: dem.maxZ },
     uDemSize: { value: new THREE.Vector2(dem.worldWidth, dem.worldHeight) },
@@ -69,6 +75,8 @@ const VERT = /* glsl */`
   varying vec2 vUv;
   varying vec2 vDemUv;
   varying vec3 vMeshNormal;
+  varying vec3 vTangent;
+  varying vec3 vBitangent;
   varying float vEdgeFade;
 
   float sampleH(vec2 worldXZ) {
@@ -113,6 +121,13 @@ const VERT = /* glsl */`
     vec3 tx = vec3(2.0 * dx, hR - hL, 0.0);
     vec3 tz = vec3(0.0, hU - hD, 2.0 * dz);
     vMeshNormal = normalize(cross(tz, tx));
+    // Pass the tangent and bitangent to the fragment shader so it can
+    // transform tangent-space normal maps into world space (TBN matrix).
+    // Tangent goes along world X (with the surface's local slope); bitangent
+    // goes along world Z. Together with the surface normal these form an
+    // orthonormal basis for sampled normals.
+    vTangent = normalize(tx);
+    vBitangent = normalize(tz);
 
     vec4 wp = modelMatrix * vec4(p, 1.0);
     vWorldPos = wp.xyz;
@@ -130,7 +145,10 @@ const FRAG = /* glsl */`
   uniform sampler2D uTexGrass;
   uniform sampler2D uTexGravel;
   uniform sampler2D uTexSand;
-  uniform sampler2D uNormal;
+  uniform sampler2D uNormalRock;
+  uniform sampler2D uNormalGrass;
+  uniform sampler2D uNormalGravel;
+  uniform sampler2D uNormalSand;
   uniform float uTextureScale;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
@@ -147,6 +165,8 @@ const FRAG = /* glsl */`
   varying vec2 vUv;
   varying vec2 vDemUv;
   varying vec3 vMeshNormal;
+  varying vec3 vTangent;
+  varying vec3 vBitangent;
   varying float vEdgeFade;
 
   void main() {
@@ -182,12 +202,28 @@ const FRAG = /* glsl */`
 
     vec3 albedo = cRock * splat.r + cGrass * splat.g + cGravel * splat.b + cSand * splat.a;
 
-    // Detail normal — punchier on close ground so low-res textures still read
-    // form. Faded out with distance to avoid tile banding at oblique angles.
-    float detailAmt = 0.55 * (1.0 - smoothstep(20.0, 260.0, distView));
-    vec3 detail = texture2D(uNormal, tileUv * 0.5).rgb * 2.0 - 1.0;
-    detail.y = abs(detail.y);
-    vec3 n = normalize(vMeshNormal + detail * detailAmt);
+    // Per-tile normal maps. Sample each one in tangent space, splat-blend by
+    // material weights, then transform the result through the TBN basis into
+    // world space. This is the standard tangent-space normal mapping setup —
+    // it's what makes the maps actually shift the lighting (an additive
+    // world-space perturbation barely changes NdotL for upward-facing terrain).
+    float detailAmt = 1.0 - smoothstep(40.0, 480.0, distView);
+    vec3 nRock   = texture2D(uNormalRock,   tileUv).rgb * 2.0 - 1.0;
+    vec3 nGrass  = texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0;
+    vec3 nGravel = texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0;
+    vec3 nSand   = texture2D(uNormalSand,   tileUv).rgb * 2.0 - 1.0;
+    vec3 nTangent = nRock * splat.r + nGrass * splat.g + nGravel * splat.b + nSand * splat.a;
+    // Boost the horizontal (R/G) deviation so the bumps actually read; leave
+    // Z (out-of-surface, the B channel) alone.
+    nTangent.xy *= 1.5;
+    nTangent = normalize(nTangent);
+    // TBN: transform tangent-space normal into world space.
+    vec3 T = normalize(vTangent);
+    vec3 B = normalize(vBitangent);
+    vec3 Nw = normalize(vMeshNormal);
+    vec3 nWorld = normalize(T * nTangent.x + B * nTangent.y + Nw * nTangent.z);
+    // Optionally fade detail with distance so far slopes don't shimmer.
+    vec3 n = normalize(mix(Nw, nWorld, detailAmt));
 
     // One strong direct sun. The fill ambient is small; a hemi-style ground
     // bounce (proportional to upward-facing normal) prevents the underside of

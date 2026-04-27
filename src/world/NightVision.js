@@ -126,9 +126,15 @@ export function createNightVision(renderer) {
   }
   resize(renderer.domElement.width || 1, renderer.domElement.height || 1);
 
+  // Toggleable from outside — main.js flips this on the N-key. Default off so
+  // first nightfall is just a dark scene; the player has to switch the lens on.
+  // We still keep a `nightAmount` blend (sun-driven) so the lens tapers off
+  // during daylight if it's left enabled across a sunrise.
+  let enabled = false;
+
   function render(worldScene, worldCamera, time, nightAmount) {
     uniforms.uTime.value = time;
-    uniforms.uNight.value = THREE.MathUtils.clamp(nightAmount, 0, 1);
+    uniforms.uNight.value = enabled ? THREE.MathUtils.clamp(nightAmount, 0, 1) : 0;
     renderer.setRenderTarget(target);
     renderer.clear();
     renderer.render(worldScene, worldCamera);
@@ -136,5 +142,10 @@ export function createNightVision(renderer) {
     renderer.render(scene, camera);
   }
 
-  return { render, resize, uniforms };
+  return {
+    render, resize, uniforms,
+    get enabled() { return enabled; },
+    setEnabled(v) { enabled = !!v; },
+    toggle() { enabled = !enabled; return enabled; }
+  };
 }

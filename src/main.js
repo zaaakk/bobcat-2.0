@@ -12,6 +12,9 @@ import { SPECIES } from './vegetation/species.js';
 import { createSky } from './world/Sky.js';
 import { createAudio } from './world/Audio.js';
 import { createNightVision } from './world/NightVision.js';
+import { createDust } from './world/Dust.js';
+import { createMobs, createVultureType } from './world/Mobs.js';
+import { createWaterPools } from './world/Water.js';
 import { loadBobcat } from './player/Bobcat.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
@@ -76,12 +79,46 @@ async function main() {
       res(t);
     }, undefined, rej));
   }
-  const [tRock, tGrass, tGravel, tSand, tNormal] = await Promise.all([
+  // Each `*normals.png` is a 2×2 atlas: TL diffuse / TR normal / BL depth /
+  // BR ORM. The diffuse already exists as a separate file, so here we slice
+  // out just the normal map (top-right cell) per material. Linear color
+  // space is critical — normal maps encode vectors, not perceptual colour.
+  function loadAtlasCell(url, cellX, cellY, { srgb = false } = {}) {
+    return new Promise((res, rej) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const half = img.width / 2;
+        const c = document.createElement('canvas');
+        c.width = c.height = half;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, cellX * half, cellY * half, half, half, 0, 0, half, half);
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.MirroredRepeatWrapping;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.anisotropy = maxAniso;
+        tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        tex.generateMipmaps = true;
+        tex.needsUpdate = true;
+        res(tex);
+      };
+      img.onerror = rej;
+      img.src = url;
+    });
+  }
+  const [tRock, tGrass, tGravel, tSand, tNormal,
+         nRock, nGrass, nGravel, nSand] = await Promise.all([
     loadTex('/assets/ground/rock.png'),
     loadTex('/assets/ground/grassdry.png'),
     loadTex('/assets/ground/gravel.png'),
     loadTex('/assets/ground/sand.png'),
-    loadTex('/assets/ground/normal.png')
+    loadTex('/assets/ground/normal.png'),
+    // Cell (1, 0) — top-right — is the normal map in each atlas.
+    loadAtlasCell('/assets/ground/rocknormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/grassdrynormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/gravelnormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/sandnormals.png', 1, 0)
   ]);
 
   setLoadingProgress(0.55, 'Building terrain mesh…');
@@ -91,6 +128,7 @@ async function main() {
   const terrain = createTerrainMesh({
     dem, heightTex, splatTex,
     groundTextures: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
+    groundNormals:  { rock: nRock, grass: nGrass, gravel: nGravel, sand: nSand },
     normalTex: tNormal,
     segments: terrainSegments,
     edgePadding: terrainEdgePadding
@@ -98,6 +136,13 @@ async function main() {
   scene.add(terrain.mesh);
 
   const groundY = (x, z) => sampleRenderedHeight(dem, terrainPlaneSize, terrainSegments, x, z);
+
+  // ---------- water pools ----------
+  // Seasonal pools at the lowest spots in the DEM (arroyos, washes). The
+  // mesh is a single drawcall covering all pools; the bobcat can later
+  // drink from nearby pools. Pool positions are exposed via water.pools
+  // for proximity checks.
+  const water = createWaterPools({ dem, groundY, scene, maxPools: 80 });
 
   // ---------- vegetation ----------
   setLoadingProgress(0.65, 'Loading flora…');
@@ -139,7 +184,91 @@ async function main() {
   cam.state.yaw = bobcat.yaw + Math.PI;
   const input = createInput();
 
-  const hud = createHUD({ dem });
+  // Dust puffs at the cat's feet — on jump start, jump landing, and on every
+  // running footfall (gated by speed so we don't puff during a quiet stalk).
+  const dust = createDust(scene);
+  bobcat.onJumpStart = pos => {
+    dust.spawn(pos.x, pos.y, pos.z, {
+      count: 5, size: 9, life: 0.6, speedT: 0.5,
+      dir: bobcat.forward
+    });
+  };
+  bobcat.onJumpLand = pos => {
+    // Bigger, lower puff on landing — feet hit hard, dust kicks outward.
+    dust.spawn(pos.x, pos.y, pos.z, {
+      count: 9, size: 11, life: 0.85, speedT: 0.9
+    });
+  };
+
+  // ---------- mobs ----------
+  // The mob registry is the entry point for every NPC in the world (vultures
+  // now, javelina/roadkill/coyotes later). Each type registers a spawn
+  // factory; main.js only knows about the registry, not individual mobs.
+  const mobs = createMobs(scene);
+  const vultureTex = await new Promise((res, rej) =>
+    texLoader.load('/assets/mobs/turkeyvulture.png', t => {
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = maxAniso;
+      res(t);
+    }, undefined, rej)
+  );
+  mobs.registerType('vulture', createVultureType(vultureTex, {
+    radius: 70,
+    altitude: 38,
+    angularSpeed: 0.16,
+    // Real wingspan is ~1.8m, but at 60-70m distance that's ~20px on screen —
+    // too easy to miss. ~5m reads clearly as a soaring bird without breaking
+    // the silhouette.
+    wingSpan: 5
+  }));
+  // The "personal" kettle of 3 above the bobcat, following the player as
+  // they wander. Camera pitch clamps at +0.4 rad (~23° looking up), so the
+  // altitude/radius are tuned to fit in frame from the default 3rd-person
+  // view — sky-high vultures sit above the upper FOV cap.
+  for (let i = 0; i < 3; i++) {
+    mobs.spawnAt('vulture', spawn.x, spawn.y, spawn.z, {
+      phase: (i * 2 * Math.PI) / 3,
+      radius: 60 + i * 5,
+      altitude: 36 + i * 2,
+      followTarget: bobcat,
+      followLerp: 0.25
+    });
+  }
+  // Distant background kettles. Each anchored at a fixed spot in the desert,
+  // 2-3 birds per kettle. The player sees them as far-off circling shapes
+  // that grow if they wander toward them. Higher altitudes make them
+  // viewable from the player's head level even when terrain rises in the
+  // foreground — and slower angular speed reads as natural soaring.
+  const distantKettles = 4;
+  for (let k = 0; k < distantKettles; k++) {
+    // Random point inside DEM bounds, well clear of the player's spawn.
+    let kx, kz;
+    do {
+      kx = (Math.random() - 0.5) * dem.worldWidth * 0.85;
+      kz = (Math.random() - 0.5) * dem.worldHeight * 0.85;
+    } while (Math.hypot(kx - spawn.x, kz - spawn.z) < 600);
+    const ky = groundY(kx, kz);
+    const birdCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
+    const kRadius = 60 + Math.random() * 40;
+    const kAltitude = 60 + Math.random() * 30;
+    for (let i = 0; i < birdCount; i++) {
+      mobs.spawnAt('vulture', kx, ky, kz, {
+        phase: (i / birdCount) * Math.PI * 2 + Math.random() * 0.5,
+        radius: kRadius + i * 6,
+        altitude: kAltitude + i * 3,
+        angularSpeed: 0.10 + Math.random() * 0.06,
+        // No followTarget: this kettle stays pinned to its anchor.
+      });
+    }
+  }
+  if (typeof window !== 'undefined') {
+    window.__mobs = mobs;
+    window.__cam = cam;
+    window.__water = water;
+    window.__bobcat = bobcat;
+  }
+
+  const hud = createHUD({ dem, water });
 
   // Night vision composite — initialised here so resolution matches the
   // current renderer size (the resize handler closure picks it up later).
@@ -240,8 +369,11 @@ async function main() {
     displayFps = THREE.MathUtils.lerp(displayFps, instantFps, 0.12);
 
     const inputs = input.sample(cam.yaw);
+    if (inputs.toggleNightVision) nightVision.toggle();
     bobcat.update(dt, inputs, dem);
     cam.update(dt);
+    dust.update(dt);
+    mobs.update(dt, t);
 
     // Keep the sky sphere centred on the camera so its direction-based shading
     // doesn't drift when the player walks far from origin (otherwise the sun
@@ -250,6 +382,7 @@ async function main() {
 
     environment.update(t);
     plants.update(t, camera.position);
+    water.update(dt, t, environment.state.sunDir, environment.state.sunColor);
     // Park the lantern just above the bobcat with a slight bob so it reads as
     // a hovering will-o'-wisp rather than a baked-in glow.
     lantern.position.set(
@@ -272,7 +405,7 @@ async function main() {
     const dayT = THREE.MathUtils.smoothstep(environment.state.sunDir.y, -0.10, 0.10);
     audio.setDayMix(dayT);
     audio.tick(t);
-    if (bobcat.speed > 1.2) {
+    if (bobcat.speed > 1.2 && !bobcat.airborne) {
       // Map speed to a cadence — shorter (= more frequent) at higher speeds.
       // Walk (~3 m/s) ≈ 0.50 s between paws; full sprint (~15 m/s) ≈ 0.13 s.
       // Roughly 4× difference so walk and sprint sound clearly distinct.
@@ -280,6 +413,17 @@ async function main() {
       const cadence = 0.50 - 0.37 * speedT;
       if (t - lastFootAt > cadence) {
         audio.footstep(speedT);
+        // Only kick dust above a jog — slow walks shouldn't spray dust on a
+        // dry-floor cat. Scale puff by speed so a sprint trails a real plume.
+        if (bobcat.speed > 4.0) {
+          dust.spawn(bobcat.position.x, bobcat.position.y, bobcat.position.z, {
+            count: 1 + Math.round(speedT * 2),
+            size: 6 + speedT * 4,
+            life: 0.45 + speedT * 0.3,
+            speedT,
+            dir: bobcat.forward
+          });
+        }
         lastFootAt = t;
       }
     }

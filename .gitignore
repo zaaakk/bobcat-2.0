@@ -3,3 +3,10 @@ dist
 .DS_Store
 .vite
 *.log
+
+# Blender working files (large; outputs go in public/assets as glb/png)
+*.blend
+*.blend1
+
+# Planet Zoo source assets — only converted PNGs/glb belong in the repo
+NABobcat/

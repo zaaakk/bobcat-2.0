@@ -1,13 +1,34 @@
 /**
  * HUD: compass strip, minimap rendering, status updates.
  * The UI elements are declared in index.html — this module just animates them.
+ *
+ * Minimap: the canvas is rendered once at full DEM extent (one hillshade); a
+ * "pan" layer wrapping it gets translated each frame so the player sits at
+ * the visible centre. Water pools are added as positioned dots inside the
+ * pan layer so they pan/zoom together with the canvas.
  */
-export function createHUD({ dem }) {
+export function createHUD({ dem, water }) {
   const compassStrip = document.getElementById('compass-strip');
+  const minimapEl = document.getElementById('minimap');
+  const minimapPan = document.getElementById('minimap-pan');
   const minimapCanvas = document.querySelector('#minimap canvas');
   const minimapCtx = minimapCanvas.getContext('2d');
   const minimapMarker = document.getElementById('minimap-marker');
   const fpsReadout = document.getElementById('fps-readout');
+
+  // Visible window in metres on the minimap. Smaller = more zoomed in; the
+  // window stays centred on the player so most of what's visible is the
+  // local terrain. ~5km diameter gives a sense of distance without forcing
+  // the player to memorise the whole 21km map.
+  const VIEW_DIAMETER_M = 5000;
+  const minimapSizePx = minimapEl.clientWidth || 168;
+  // Canvas displays at (worldWidth / VIEW_DIAMETER_M) × the minimap size, so
+  // VIEW_DIAMETER_M of world fills the visible window. Internal canvas
+  // resolution stays at its declared 640×640 — large enough that the zoomed
+  // hillshade reads sharp.
+  const canvasDisplaySize = (dem.worldWidth / VIEW_DIAMETER_M) * minimapSizePx;
+  minimapCanvas.style.width = canvasDisplaySize + 'px';
+  minimapCanvas.style.height = canvasDisplaySize + 'px';
 
   // Build a 720° compass strip (so the stripe never runs out as you spin).
   // Each character spans 60px in CSS; full rotation = 360 * (60 / 30deg) … we'll
@@ -23,17 +44,52 @@ export function createHUD({ dem }) {
   // Pre-render a static minimap from the DEM (once).
   renderMinimap(minimapCtx, minimapCanvas, dem);
 
+  // Drop a water-pool dot per pool into the pan layer. Sizes scale with the
+  // pool radius, but capped so big river pools don't dominate the minimap.
+  const waterDots = [];
+  if (water && water.pools) {
+    for (const p of water.pools) {
+      const dot = document.createElement('div');
+      dot.className = 'minimap-water';
+      // Convert world-metres to display-pixels at the minimap's zoom.
+      const radiusPx = Math.max(2, Math.min(8, (p.r / VIEW_DIAMETER_M) * minimapSizePx * 2.5));
+      dot.style.width = radiusPx + 'px';
+      dot.style.height = radiusPx + 'px';
+      dot.style.transform = 'translate(-50%, -50%)';
+      // Pool world-position → display pixel within the (canvasDisplaySize)
+      // pan layer. (u,v) are in 0..1 across the DEM extent.
+      const u = (p.x / dem.worldWidth) + 0.5;
+      const v = 1 - ((p.z / dem.worldHeight) + 0.5);
+      dot.style.left = (u * canvasDisplaySize) + 'px';
+      dot.style.top = (v * canvasDisplaySize) + 'px';
+      minimapPan.appendChild(dot);
+      waterDots.push(dot);
+    }
+  }
+
   function update({ playerYaw, playerPos, fps }) {
     // Compass: when player faces +Z (yaw=0), 'N' should be centered.
     // Strip is 220px wide. We position so middle index of stripe ('N' in second copy) sits centered minus yaw offset.
     const centerOffset = -((points.length + 4) * 60 - 110); // start centered on second-block 'N'
     compassStrip.style.left = `${centerOffset + playerYaw * PX_PER_RAD}px`;
 
-    // Minimap marker: convert world position to canvas-relative %.
+    // Translate the pan layer so the player's world position lands at the
+    // minimap's visible centre. (u,v) are 0..1 across the DEM; scaling by
+    // canvasDisplaySize gives the player's pixel offset *within* the zoomed
+    // canvas, which we then negate and add half-minimap so the player ends
+    // up dead-centre in the overflow:hidden window.
     const u = (playerPos.x / dem.worldWidth) + 0.5;
     const v = 1 - ((playerPos.z / dem.worldHeight) + 0.5);
-    minimapMarker.style.left = `${u * 100}%`;
-    minimapMarker.style.top  = `${v * 100}%`;
+    const tx = (minimapSizePx * 0.5) - (u * canvasDisplaySize);
+    const ty = (minimapSizePx * 0.5) - (v * canvasDisplaySize);
+    minimapPan.style.transform = `translate(${tx}px, ${ty}px)`;
+    // Rotate the marker to match the bobcat's facing. yaw=0 → moves +Z =
+    // top of the minimap (north), so the default upward-pointing triangle
+    // is the correct rest orientation; CSS rotate is clockwise, which
+    // matches our world-yaw convention (yaw=π/2 → east → triangle right).
+    if (minimapMarker) {
+      minimapMarker.style.transform = `translate(-50%, -50%) rotate(${playerYaw}rad)`;
+    }
 
     if (fpsReadout && Number.isFinite(fps)) {
       fpsReadout.textContent = String(Math.round(fps)).padStart(3, '0');

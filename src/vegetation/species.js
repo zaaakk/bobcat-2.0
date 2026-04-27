@@ -104,5 +104,56 @@ export const SPECIES = [
     suitability: (slopeT, elevT) =>
       HABITAT.smooth(0.06, 0.30, slopeT) * HABITAT.smooth(0.25, 0.85, elevT) *
       (1 - HABITAT.smooth(0.55, 0.90, slopeT))   // not on cliffs
+  },
+  {
+    id: 6,
+    name: 'creosote',
+    file: '/assets/plants/creosote.png',
+    atlasIndex: 6,
+    height: [0.9, 1.6],
+    aspect: 1.2,
+    // Larrea tridentata — the dominant Chihuahuan shrub. Widespread and
+    // common, scatters through bajadas and flats but thins on rock + at high
+    // elev. Low clumpFreq → broad, gentle bands of preferred density.
+    densityScale: 2.4,
+    clumpSeed: 0.97, clumpFreq: 0.0010, clumpSharpness: 1.4, clumpFloor: 0.16,
+    suitability: (slopeT, elevT, drainage) =>
+      Math.max(0, 1.0 - slopeT * 1.6) *
+      HABITAT.smooth(0.0, 0.6, 1 - elevT) *
+      (0.6 + 0.4 * (1 - drainage))
+  },
+  {
+    id: 7,
+    name: 'lechugilla',
+    file: '/assets/plants/lechugilla.png',
+    atlasIndex: 7,
+    height: [0.5, 0.9],
+    aspect: 0.95,
+    // Agave lechuguilla — the indicator species of the Chihuahuan desert.
+    // Rocky limestone slopes; small, spiny, clusters tightly. Heavy clumps
+    // because they reproduce by offsets.
+    densityScale: 2.2,
+    clumpSeed: 0.05, clumpFreq: 0.0030, clumpSharpness: 2.6, clumpFloor: 0.12,
+    clusterCount: [3, 6],
+    clusterRadius: [0.25, 1.1],
+    suitability: (slopeT, elevT) =>
+      HABITAT.smooth(0.10, 0.55, slopeT) * HABITAT.smooth(0.15, 0.7, elevT) *
+      (1 - HABITAT.smooth(0.65, 0.92, slopeT))   // not on sheer cliffs
+  },
+  {
+    id: 8,
+    name: 'velvetmesquite',
+    file: '/assets/plants/velvetmesquite.png',
+    atlasIndex: 8,
+    height: [4.0, 6.5],
+    aspect: 1.1,
+    // Prosopis velutina — bigger tree-form mesquite. Less common than the
+    // shrubby form (id 0), follows arroyos and lowland drainage where there's
+    // more water. Sparse + tall reads as a different layer.
+    densityScale: 0.45,
+    clumpSeed: 0.34, clumpFreq: 0.0009, clumpSharpness: 1.6, clumpFloor: 0.10,
+    suitability: (slopeT, elevT, drainage) =>
+      Math.max(0, drainage * 1.6 - slopeT * 1.8) *
+      HABITAT.smooth(0.0, 0.45, 1 - elevT)
   }
 ];
