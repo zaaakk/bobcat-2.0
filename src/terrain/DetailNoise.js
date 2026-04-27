@@ -73,6 +73,12 @@ export function generateDetailNoise({
   fineAmp        = 0.25,   // metres peak displacement (signed)
   fineSeed       = 0.911,
   seed           = 0.137,
+  // Macro-mask thresholds. Detail multiplier = smoothstep(maskLo, maskHi, ridge).
+  // Below maskLo ridge value, no detail; above maskHi, full detail; in between,
+  // smooth blend. Result: smooth plains in low-ridge zones, full caprock
+  // structure on actual ridges. Setting both to 0 disables the mask.
+  maskLo         = 0.20,
+  maskHi         = 0.55,
 } = {}) {
   const noise = createNoise2D(() => seed);
   const w = resolution, h = resolution;
@@ -152,6 +158,8 @@ export function generateDetailNoise({
     bedAmp,
     bedPeriod,
     bedWarpAmp,
+    maskLo,
+    maskHi,
     texture,
     fine: {
       ...fine,

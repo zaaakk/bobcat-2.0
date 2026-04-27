@@ -235,6 +235,16 @@ async function main() {
             value: u.uFineTileSize.value,
             onInput: v => u.uFineTileSize.value = v,
           });
+          panelRow(el, {
+            label: 'Mask lo', min: 0, max: 1, step: 0.01,
+            value: u.uMaskLo.value,
+            onInput: v => u.uMaskLo.value = v,
+          });
+          panelRow(el, {
+            label: 'Mask hi', min: 0, max: 1, step: 0.01,
+            value: u.uMaskHi.value,
+            onInput: v => u.uMaskHi.value = v,
+          });
           panelButton(el, 'Reset', () => {
             u.uRidgeAmp.value = 2.1;
             u.uBedAmp.value = 1.6;
@@ -242,6 +252,8 @@ async function main() {
             u.uBedWarpAmp.value = 14.0;
             u.uFineAmp.value = 0.25;
             u.uFineTileSize.value = 16.0;
+            u.uMaskLo.value = 0.20;
+            u.uMaskHi.value = 0.55;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           // Wireframe toggle — toggles on the base terrain AND the detail

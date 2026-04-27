@@ -113,11 +113,13 @@ export class TerrainQuery {
     const bedTau = 6.283185307179586 / dn.bedPeriod;
     const pulse = Math.max(0, Math.sin(warpedH * bedTau) - 0.5) * 2;
     // Fine layer (tile-wrapped FBM in [-1, 1]), domain-warped by the
-    // broad ridge value so the 16m tile pattern doesn't read as a regular
-    // grid. Mirrors the GPU shader.
+    // broad ridge value so the 16m tile pattern doesn't read as regular.
     const fine = dn.fine ? this._sampleFineTile(x + ridge * 4.0, z + ridge * 3.0) : 0;
     const fineAmp = dn.fine ? dn.fine.amp : 0;
-    return ridge * dn.ridgeAmp + pulse * dn.bedAmp + fine * fineAmp;
+    // Macro-mask: detail concentrates where ridge is high. Mirrors the
+    // shader's smoothstep(uMaskLo, uMaskHi, ridge).
+    const mask = smoothstep(dn.maskLo, dn.maskHi, ridge);
+    return (ridge * dn.ridgeAmp + pulse * dn.bedAmp + fine * fineAmp) * mask;
   }
 
   /**
@@ -390,6 +392,12 @@ class TerrainCell {
     const nj = clamp(this.j + dj, 0, dem.height - 1);
     return dem.data[nj * dem.width + ni];
   }
+}
+
+function smoothstep(edge0, edge1, x) {
+  if (edge1 === edge0) return x < edge0 ? 0 : 1;
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function clamp(v, lo, hi) {

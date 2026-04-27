@@ -73,6 +73,13 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     // and base material can use a single object.
     uPatchCenter:      { value: new THREE.Vector2(0, 0) },
     uPatchHalfSize:    { value: 75.0 },
+    // Macro-mask thresholds: detail multiplier = smoothstep(uMaskLo, uMaskHi, ridge).
+    // ridge is the broad ridged-multifractal lookup in [0, 1]. Setting
+    // uMaskLo = uMaskHi = 0 effectively disables the mask (everywhere full
+    // detail). The defaults concentrate detail on actual ridges and leave
+    // low-ridge plains smooth.
+    uMaskLo:           { value: 0.20 },
+    uMaskHi:           { value: 0.55 },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -107,6 +114,8 @@ export const TERRAIN_VERT = /* glsl */`
   uniform float uFineTileSize;
   uniform float uFineAmp;
   uniform float uPatchHalfSize;
+  uniform float uMaskLo;
+  uniform float uMaskHi;
 
   varying vec3 vWorldPos;
   varying vec2 vUv;
@@ -134,14 +143,17 @@ export const TERRAIN_VERT = /* glsl */`
     float warpedH = hDem + ridge * uBedWarpAmp;
     float bedTau  = 6.283185307179586 / uBedPeriod;
     float pulse   = max(0.0, sin(warpedH * bedTau) - 0.5) * 2.0;
-    // Fine layer: tile-wrapped FBM in [-1, 1]. We domain-warp its UVs by
-    // the broad-ridge value so the tile pattern doesn't read as a regular
-    // 16m grid — the broad ridge is world-aligned and doesn't repeat, so
-    // the fine pattern wanders with the macro features. Costs nothing
-    // extra (we already sampled the ridge above).
+    // Fine layer: tile-wrapped FBM in [-1, 1], domain-warped by the broad
+    // ridge so the 16m tile pattern doesn't read as a regular grid.
     vec2 warpedXZ = worldXZ + vec2(ridge * 4.0, ridge * 3.0);
     float fine = texture2D(uFineTex, warpedXZ / uFineTileSize).r;
-    return ridge * uRidgeAmp + pulse * uBedAmp + fine * uFineAmp;
+    // Macro mask: gate ALL detail by smoothstep of the ridge value so
+    // smooth (low-ridge) areas read as bare DEM and detail concentrates
+    // in caprock-y high-ridge zones. Matches real geology — eroded plains
+    // are smooth, exposed bedrock has the bench/ridge structure. uMaskLo
+    // / uMaskHi are tunable in the debug panel.
+    float mask = smoothstep(uMaskLo, uMaskHi, ridge);
+    return (ridge * uRidgeAmp + pulse * uBedAmp + fine * uFineAmp) * mask;
   }
 
   // Detail-fade multiplier — keeps the detail patch (a 256-segment mesh
@@ -268,8 +280,16 @@ export const TERRAIN_FRAG = /* glsl */`
     // patch material has IS_PATCH defined so it draws normally; the base
     // mesh discards inside the patch's coverage and lets the patch fill it.
     #ifndef IS_PATCH
+      // Discard slightly INSIDE the patch's geometric edge so there's a
+      // 1m overlap zone where both meshes draw. Without the overlap, the
+      // patch's last vertex at exactly halfSize and the base mesh's first
+      // un-discarded fragment just past halfSize land on different
+      // triangulations of the same DEM — small differences leave a
+      // visible seam line. Overlapping lets both meshes render in the
+      // 1m strip; depth-test picks the closer one and any difference
+      // hides under the patch's faded detail.
       vec2 patchLocal = worldXZ - uPatchCenter;
-      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize) {
+      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize - 1.0) {
         discard;
       }
     #endif
