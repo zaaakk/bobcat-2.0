@@ -164,6 +164,12 @@ function buildRig(gltf, pzTextures) {
   root.traverse(o => {
     if (o.isSkinnedMesh && /nabobcat/i.test(o.name || '')) isPZ = true;
   });
+  // Apply rotations as YXZ so the PZ yaw fix is the OUTERMOST rotation.
+  // That way root.rotation.x (used by the drink-pose tilt below) pivots
+  // the cat around its body's true horizontal axis, regardless of the yaw
+  // correction. Default order is XYZ which would tilt around world axes
+  // and pitch the cat sideways.
+  root.rotation.order = 'YXZ';
   if (isPZ) root.rotation.y = -Math.PI / 2;
   console.log('bobcat orientation:', isPZ ? 'Planet Zoo (rotated -90°)' : 'Quaternius (no rotation)');
 
@@ -303,6 +309,27 @@ function buildRig(gltf, pzTextures) {
     }
   }
 
+  // Drink pose — when active, lerps the root's pitch toward `drinkAngle` so
+  // the cat visibly leans forward (head down) toward the water. Released
+  // smoothly when inactive. With root.rotation.order = 'YXZ', the X-axis
+  // tilt happens AFTER the yaw fix, so the cat tilts around its body's
+  // forward axis correctly.
+  let drinkPose = 0;
+  const DRINK_ANGLE = 0.55;   // radians forward — about 31°, "stooped"
+  function setDrinkPose(active, dt) {
+    const target = active ? 1.0 : 0.0;
+    const k = Math.min(1, dt * 6);
+    drinkPose += (target - drinkPose) * k;
+    // Animation mixer drives the rest of the pose; we layer the drink tilt
+    // by writing root.rotation.x. (Mixer-controlled bones aren't on the
+    // root transform, so we don't fight with it.) Slight Y dip too — the
+    // cat lowers itself a touch as it bends.
+    if (mixer) {
+      root.rotation.x = drinkPose * DRINK_ANGLE;
+      root.position.y = footY - drinkPose * 0.06;
+    }
+  }
+
   return {
     object: pivot,
     pivot,
@@ -313,6 +340,7 @@ function buildRig(gltf, pzTextures) {
     setLocomotionBlend,
     playJump,
     stopJump,
+    setDrinkPose,
     tick
   };
 }

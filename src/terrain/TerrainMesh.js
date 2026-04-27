@@ -68,6 +68,12 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uFineTex:          { value: detailNoise && detailNoise.fine ? detailNoise.fine.texture : heightTex },
     uFineTileSize:     { value: detailNoise && detailNoise.fine ? detailNoise.fine.tileSize : 1.0 },
     uFineAmp:          { value: detailNoise && detailNoise.fine ? detailNoise.fine.amp     : 0.0 },
+    // Carve layer: signed bowl-shaped depressions at each pool, applied
+    // OUTSIDE the detail mask so the bowl always exists regardless of
+    // ridge value. Texture stores values in [-1, 0]; uCarveAmp scales to
+    // metres of carve depth.
+    uCarveTex:         { value: detailNoise && detailNoise.carve ? detailNoise.carve.texture : heightTex },
+    uCarveAmp:         { value: detailNoise && detailNoise.carve ? detailNoise.carve.amp : 0.0 },
     // Detail-patch parameters: only consumed when IS_PATCH is defined
     // (see DetailPatch.js). Live in the shared uniforms block so the patch
     // and base material can use a single object.
@@ -78,8 +84,14 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     // uMaskLo = uMaskHi = 0 effectively disables the mask (everywhere full
     // detail). The defaults concentrate detail on actual ridges and leave
     // low-ridge plains smooth.
-    uMaskLo:           { value: 0.20 },
-    uMaskHi:           { value: 0.55 },
+    uMaskLo:           { value: detailNoise ? detailNoise.maskLo : 0.20 },
+    uMaskHi:           { value: detailNoise ? detailNoise.maskHi : 0.55 },
+    // Bench-specific mask — stricter than the general one so the binary
+    // bedding pulse only fires on clearly-ridged terrain. Avoids the
+    // "stairsteps everywhere" artifact even when the user pushes bench
+    // amplitude or shrinks bench period.
+    uBenchMaskLo:      { value: detailNoise ? detailNoise.benchMaskLo : 0.55 },
+    uBenchMaskHi:      { value: detailNoise ? detailNoise.benchMaskHi : 0.78 },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -101,6 +113,7 @@ export const TERRAIN_VERT = /* glsl */`
   uniform sampler2D uHeightmap;
   uniform sampler2D uDetailTex;
   uniform sampler2D uFineTex;
+  uniform sampler2D uCarveTex;
   uniform vec2 uDemSize;
   uniform vec2 uDetailWorldSize;
   uniform vec2 uPlaneSize;
@@ -113,9 +126,12 @@ export const TERRAIN_VERT = /* glsl */`
   uniform float uDetailHas;
   uniform float uFineTileSize;
   uniform float uFineAmp;
+  uniform float uCarveAmp;
   uniform float uPatchHalfSize;
   uniform float uMaskLo;
   uniform float uMaskHi;
+  uniform float uBenchMaskLo;
+  uniform float uBenchMaskHi;
 
   varying vec3 vWorldPos;
   varying vec2 vUv;
@@ -147,13 +163,16 @@ export const TERRAIN_VERT = /* glsl */`
     // ridge so the 16m tile pattern doesn't read as a regular grid.
     vec2 warpedXZ = worldXZ + vec2(ridge * 4.0, ridge * 3.0);
     float fine = texture2D(uFineTex, warpedXZ / uFineTileSize).r;
-    // Macro mask: gate ALL detail by smoothstep of the ridge value so
-    // smooth (low-ridge) areas read as bare DEM and detail concentrates
-    // in caprock-y high-ridge zones. Matches real geology — eroded plains
-    // are smooth, exposed bedrock has the bench/ridge structure. uMaskLo
-    // / uMaskHi are tunable in the debug panel.
-    float mask = smoothstep(uMaskLo, uMaskHi, ridge);
-    return (ridge * uRidgeAmp + pulse * uBedAmp + fine * uFineAmp) * mask;
+    // Two macro masks. The general one gates the smooth ridge + fine
+    // layers (acceptable in transition zones). The bench mask is stricter:
+    // the bedding pulse is binary-ish, so a half-mask still leaves visible
+    // stairsteps. Confining benches to clearly-ridged areas keeps
+    // transitions smooth.
+    float mask      = smoothstep(uMaskLo,      uMaskHi,      ridge);
+    float benchMask = smoothstep(uBenchMaskLo, uBenchMaskHi, ridge);
+    return ridge * uRidgeAmp * mask
+         + pulse * uBedAmp   * benchMask
+         + fine  * uFineAmp  * mask;
   }
 
   // Detail-fade multiplier — keeps the detail patch (a 256-segment mesh
@@ -172,6 +191,16 @@ export const TERRAIN_VERT = /* glsl */`
     #endif
   }
 
+  // Carve sample: signed dip stored in a world-aligned texture, in metres
+  // after multiplying by uCarveAmp. Always negative or zero. We apply this
+  // OUTSIDE the detail mask so even fully-masked-out smooth areas still
+  // get the bowl carved for any pools that fall there.
+  float sampleCarve(vec2 worldXZ) {
+    vec2 uv = (worldXZ / uDetailWorldSize) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    return texture2D(uCarveTex, uv).r * uCarveAmp;
+  }
+
   float sampleHEdge(vec2 worldXZ) {
     // Drop both the DEM and the detail through the edge fade so the padding
     // ring stays clean (no stray noise outside the world).
@@ -184,7 +213,8 @@ export const TERRAIN_VERT = /* glsl */`
     ef = ef * ef;
     float baseH = mix(hDem, hDem - 80.0, ef);
     float detailMul = (1.0 - ef) * patchDetailFade(worldXZ);
-    return baseH + sampleDetail(worldXZ, hDem) * detailMul;
+    return baseH + sampleDetail(worldXZ, hDem) * detailMul
+                 + sampleCarve(worldXZ) * (1.0 - ef);
   }
 
   void main() {

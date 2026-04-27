@@ -26,7 +26,15 @@ export async function loadBobcat({ url = '/assets/bobcat.glb', onProgress } = {}
 
   state.update = (dt, inputs, dem) => {
     updateSim(dt, inputs, dem, rig);
-    rig.setLocomotionBlend(state.speed, state.walkSpeed, state.runSpeed, state.airborne);
+    // While drinking, fade the locomotion blend out (idle weight = 0 too)
+    // so the only thing driving the pose is the drink tilt — otherwise the
+    // mixer's idle still asserts a level head and fights the rig tilt.
+    rig.setLocomotionBlend(
+      state.isDrinking ? 0 : state.speed,
+      state.walkSpeed, state.runSpeed,
+      state.airborne || state.isDrinking,    // treat as "off-locomotion"
+    );
+    rig.setDrinkPose(state.isDrinking, dt);
     rig.tick(dt, state);
   };
 

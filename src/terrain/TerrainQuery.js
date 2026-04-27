@@ -54,12 +54,38 @@ export class TerrainQuery {
    * the GPU's texture sampling convention. If a detail noise field is
    * configured, its bilinear contribution is added on top — this keeps the
    * sample in lockstep with the vertex shader's per-vertex displacement.
+   *
+   * The carve layer (signed bowl depressions for water pools) is also added,
+   * outside the detail mask, so the bobcat's grounding tracks into pools
+   * even where the macro mask kills surface detail.
    */
   sampleHeight(x, z) {
     const base = this._sampleDemHeight(x, z);
-    return this.detailNoise
-      ? base + this.sampleDetail(x, z)
-      : base;
+    if (!this.detailNoise) return base;
+    return base + this.sampleDetail(x, z) + this.sampleCarve(x, z);
+  }
+
+  /** Carve depth in metres at (x, z). Negative or zero. */
+  sampleCarve(x, z) {
+    const dn = this.detailNoise;
+    if (!dn || !dn.carve) return 0;
+    const c = dn.carve;
+    const src = c.renderData;
+    const u = (x / c.worldWidth  + 0.5) * c.width  - 0.5;
+    const v = (z / c.worldHeight + 0.5) * c.height - 0.5;
+    const x0 = Math.floor(u), y0 = Math.floor(v);
+    const fx = u - x0, fy = v - y0;
+    const cx0 = clamp(x0, 0, c.width - 1);
+    const cy0 = clamp(y0, 0, c.height - 1);
+    const cx1 = clamp(x0 + 1, 0, c.width - 1);
+    const cy1 = clamp(y0 + 1, 0, c.height - 1);
+    const h00 = src[cy0 * c.width + cx0];
+    const h10 = src[cy0 * c.width + cx1];
+    const h01 = src[cy1 * c.width + cx0];
+    const h11 = src[cy1 * c.width + cx1];
+    const h0 = h00 * (1 - fx) + h10 * fx;
+    const h1 = h01 * (1 - fx) + h11 * fx;
+    return (h0 * (1 - fy) + h1 * fy) * c.amp;
   }
 
   /** DEM-only height (no detail). Useful for pre-detail analysis. */
@@ -116,10 +142,14 @@ export class TerrainQuery {
     // broad ridge value so the 16m tile pattern doesn't read as regular.
     const fine = dn.fine ? this._sampleFineTile(x + ridge * 4.0, z + ridge * 3.0) : 0;
     const fineAmp = dn.fine ? dn.fine.amp : 0;
-    // Macro-mask: detail concentrates where ridge is high. Mirrors the
-    // shader's smoothstep(uMaskLo, uMaskHi, ridge).
-    const mask = smoothstep(dn.maskLo, dn.maskHi, ridge);
-    return (ridge * dn.ridgeAmp + pulse * dn.bedAmp + fine * fineAmp) * mask;
+    // Two macro masks. The general one gates the smooth ridge + fine
+    // layers; the stricter bench mask keeps stairsteps confined to
+    // clearly-ridged areas (avoids partial-mask stairsteps in transitions).
+    const mask      = smoothstep(dn.maskLo,      dn.maskHi,      ridge);
+    const benchMask = smoothstep(dn.benchMaskLo, dn.benchMaskHi, ridge);
+    return ridge * dn.ridgeAmp * mask
+         + pulse * dn.bedAmp   * benchMask
+         + fine  * fineAmp     * mask;
   }
 
   /**

@@ -79,12 +79,25 @@ export function generateDetailNoise({
   // structure on actual ridges. Setting both to 0 disables the mask.
   maskLo         = 0.20,
   maskHi         = 0.55,
+  // Bench-specific mask. The bedding pulse is binary-ish (max(sin - 0.5, 0))
+  // so even a half-strength mask still leaves visible stairsteps. Gating the
+  // bench layer with a *stricter* mask than the ridge/fine layers keeps
+  // stairsteps confined to clearly-ridged areas; transition zones stay
+  // smooth.
+  benchMaskLo    = 0.55,
+  benchMaskHi    = 0.78,
   // Water-pool exclusion list. After the broad ridge is baked, we scale the
   // ridge value to 0 within each pool's radius (and blend smoothly out over
   // poolFadeRadius beyond) so caprock bumps don't stick up through the
   // water surface. Pools shape: { x, z, r } in world coords.
   pools          = [],
   poolFadeRadius = 5.0,
+  // Carve depth: actual signed displacement that lowers terrain inside each
+  // pool's radius (and over the fade ring). Without this, bowls are at most
+  // MIN_DEPTH (0.4m) deep — barely visible. The carve runs OUTSIDE the
+  // detail mask, so it always applies regardless of ridge value, and the
+  // bobcat's CPU groundY mirrors the GPU shader so it tracks into the bowl.
+  carveAmp       = 0.85,
 } = {}) {
   const noise = createNoise2D(() => seed);
   const w = resolution, h = resolution;
@@ -166,6 +179,61 @@ export function generateDetailNoise({
     renderData[i] = THREE.DataUtils.fromHalfFloat(hf);
   }
 
+  // ── Carve layer ─────────────────────────────────────────────────────
+  // Negative displacement (in [-1, 0]) painted into a separate texture for
+  // each pool. -1 inside the pool radius, smoothly blended back to 0 over
+  // poolFadeRadius outside the rim. Sampled in the vertex shader and added
+  // to the surface elevation OUTSIDE the detail mask, so even where the
+  // mask kills detail entirely, the bowl is still carved.
+  const carveData = new Float32Array(w * h);
+  if (pools.length) {
+    const texelSize = worldWidth / w;
+    for (const pool of pools) {
+      const fullRadius = pool.r + poolFadeRadius;
+      const cellRange = Math.ceil(fullRadius / texelSize) + 1;
+      const cu = (pool.x / worldWidth + 0.5) * w - 0.5;
+      const cv = (pool.z / worldHeight + 0.5) * h - 0.5;
+      const ci = Math.round(cu);
+      const cj = Math.round(cv);
+      for (let dj = -cellRange; dj <= cellRange; dj++) {
+        const j = cj + dj;
+        if (j < 0 || j >= h) continue;
+        const wz = ((j + 0.5) / h - 0.5) * worldHeight;
+        for (let di = -cellRange; di <= cellRange; di++) {
+          const i = ci + di;
+          if (i < 0 || i >= w) continue;
+          const wx = ((i + 0.5) / w - 0.5) * worldWidth;
+          const dist = Math.hypot(wx - pool.x, wz - pool.z);
+          if (dist >= fullRadius) continue;
+          // -1 inside the pool, 0 at the fade edge. Take the MIN with any
+          // existing carve so overlapping pools don't sum to deeper values.
+          const t = Math.max(0, (dist - pool.r) / poolFadeRadius);
+          const fade = t * t * (3 - 2 * t);
+          const c = -(1 - fade);
+          const idx = j * w + i;
+          if (c < carveData[idx]) carveData[idx] = c;
+        }
+      }
+    }
+  }
+  const carveHalfData = new Uint16Array(carveData.length);
+  const carveRenderData = new Float32Array(carveData.length);
+  for (let i = 0; i < carveData.length; i++) {
+    const hf = THREE.DataUtils.toHalfFloat(carveData[i]);
+    carveHalfData[i] = hf;
+    carveRenderData[i] = THREE.DataUtils.fromHalfFloat(hf);
+  }
+  const carveTexture = new THREE.DataTexture(
+    carveHalfData, w, h,
+    THREE.RedFormat, THREE.HalfFloatType
+  );
+  carveTexture.wrapS = THREE.ClampToEdgeWrapping;
+  carveTexture.wrapT = THREE.ClampToEdgeWrapping;
+  carveTexture.minFilter = THREE.LinearFilter;
+  carveTexture.magFilter = THREE.LinearFilter;
+  carveTexture.generateMipmaps = false;
+  carveTexture.needsUpdate = true;
+
   const texture = new THREE.DataTexture(
     halfData, w, h,
     THREE.RedFormat, THREE.HalfFloatType
@@ -198,12 +266,24 @@ export function generateDetailNoise({
     bedWarpAmp,
     maskLo,
     maskHi,
+    benchMaskLo,
+    benchMaskHi,
     texture,
     fine: {
       ...fine,
       tileSize: fineTileSize,
       amp: fineAmp,
-    }
+    },
+    carve: {
+      data: carveData,
+      renderData: carveRenderData,
+      width: w,
+      height: h,
+      worldWidth,
+      worldHeight,
+      amp: carveAmp,
+      texture: carveTexture,
+    },
   };
 }
 
