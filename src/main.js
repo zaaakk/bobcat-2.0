@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
-import { loadDEM, heightmapTexture, sampleRenderedHeight, sampleSlope } from './terrain/DEMLoader.js';
+import { loadDEM, heightmapTexture } from './terrain/DEMLoader.js';
+import { TerrainQuery } from './terrain/TerrainQuery.js';
 import { generateSplatMap } from './terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from './terrain/TerrainMesh.js';
 
@@ -135,14 +136,22 @@ async function main() {
   });
   scene.add(terrain.mesh);
 
-  const groundY = (x, z) => sampleRenderedHeight(dem, terrainPlaneSize, terrainSegments, x, z);
+  // Single shared landscape-query layer. Every feature that needs to ask
+  // questions about the terrain (water, mobs, vegetation, spawn selection)
+  // goes through this — no direct dem.data[] reads outside DEMLoader.
+  const terrainQuery = new TerrainQuery({
+    dem,
+    terrainPlaneSize,
+    terrainSegments
+  });
+  const groundY = (x, z) => terrainQuery.sampleGroundY(x, z);
 
   // ---------- water pools ----------
   // Seasonal pools at the lowest spots in the DEM (arroyos, washes). The
   // mesh is a single drawcall covering all pools; the bobcat can later
   // drink from nearby pools. Pool positions are exposed via water.pools
   // for proximity checks.
-  const water = createWaterPools({ dem, groundY, scene, maxPools: 80 });
+  const water = createWaterPools({ terrainQuery, scene, maxPools: 80 });
 
   // ---------- vegetation ----------
   setLoadingProgress(0.65, 'Loading flora…');
@@ -173,7 +182,7 @@ async function main() {
   const bobcat = await loadBobcat({
     onProgress: t => setLoadingProgress(0.88 + t * 0.10, 'Waking bobcat…')
   });
-  const spawn = chooseSpawnPoint(dem, groundY);
+  const spawn = chooseSpawnPoint(terrainQuery);
   bobcat.position.set(spawn.x, spawn.y, spawn.z);
   bobcat.yaw = spawn.yaw;
   bobcat.pivot.rotation.y = spawn.yaw;
@@ -464,11 +473,11 @@ async function main() {
   requestAnimationFrame(frame);
 }
 
-function chooseSpawnPoint(dem, groundY, maxRadius = 2800) {
+function chooseSpawnPoint(terrainQuery, maxRadius = 2800) {
   // Constrain to a circle so the bobcat always spawns inside the vegetation
   // zone. (The plant placer uses a finite playRadius around origin — spawning
   // far outside leaves the bobcat in a bare wasteland with no plants anywhere.)
-  let fallback = { x: 0, y: groundY(0, 0), z: 0, yaw: Math.random() * Math.PI * 2 };
+  let fallback = { x: 0, y: terrainQuery.sampleGroundY(0, 0), z: 0, yaw: Math.random() * Math.PI * 2 };
   let bestScore = -Infinity;
 
   for (let i = 0; i < 28; i++) {
@@ -476,8 +485,8 @@ function chooseSpawnPoint(dem, groundY, maxRadius = 2800) {
     const a = Math.random() * Math.PI * 2;
     const x = Math.cos(a) * r;
     const z = Math.sin(a) * r;
-    const y = groundY(x, z);
-    const slope = sampleSlope(dem, x, z, 4);
+    const y = terrainQuery.sampleGroundY(x, z);
+    const slope = terrainQuery.sampleSlope(x, z, 4);
     const edge = maxRadius - r;
     const score = edge - slope * 1400;
     if (score > bestScore) {

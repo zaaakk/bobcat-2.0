@@ -9,33 +9,34 @@ import * as THREE from 'three';
  * pond's local water level. All discs go into one merged BufferGeometry =
  * one drawcall, so even a dozen pools cost nothing.
  *
+ * Spatial queries go through TerrainQuery — no direct DEM access. That keeps
+ * the same conventions (half-pixel correct, edge-clamped neighbours) shared
+ * with every other landscape feature, and means a future change to terrain
+ * sampling (e.g. switching to a streaming DEM) doesn't have to touch this
+ * file.
+ *
  * `update(dt, t)` advances a per-vertex shimmer in the shader.
  */
-export function createWaterPools({ dem, groundY, scene, maxPools = 60 }) {
+export function createWaterPools({ terrainQuery, scene, maxPools = 60 }) {
+  const tq = terrainQuery;
   // ---------- pond detection ----------
   // Two flavours, both realistic for the Devil's River watershed:
   //   1. "river" — the actual lowest cells in the DEM (bottom 4%). Greedy-
   //      clustered by proximity, these become the perennial water in the
   //      Devil's River channel (and a couple of major arroyos).
   //   2. "tinaja" — local minima everywhere else. A cell is a tinaja anchor
-  //      if it's lower than every neighbour within `minimaRadius` cells AND
-  //      at least `minDepth` metres deeper than its surroundings. These
-  //      represent the seasonal rock-pools scattered across the desert and
-  //      give the player water within a reasonable walk of any spawn.
-  const W = dem.width, H = dem.height;
-  const pixelSize = dem.pixelSizeX;
-  const elevRange = dem.maxZ - dem.minZ;
+  //      if 6+ of 8 ring neighbours at radius=3 are higher AND the mean ring
+  //      is at least `minDepth` metres above. These represent the seasonal
+  //      rock-pools scattered across the desert and give the player water
+  //      within a reasonable walk of any spawn.
+  const pixelSize = tq.pixelSize;
+  const elevRange = tq.maxElevation - tq.minElevation;
 
   // ---- Type 1: river / major channel ----
-  const riverThresh = dem.minZ + elevRange * 0.04;
-  const lowCells = [];
-  for (let j = 0; j < H; j++) {
-    for (let i = 0; i < W; i++) {
-      const z = dem.data[j * W + i];
-      if (z < riverThresh) lowCells.push({ i, j, z });
-    }
-  }
-  lowCells.sort((a, b) => a.z - b.z);
+  const riverThresh = tq.minElevation + elevRange * 0.04;
+  const lowCells = tq.findCells(c => c.height < riverThresh)
+    .map(c => ({ i: c.i, j: c.j, z: c.height }))
+    .sort((a, b) => a.z - b.z);
   const mergeRadiusM = 30;
   const mergeRadiusCells = mergeRadiusM / pixelSize;
   const riverPools = [];
@@ -69,34 +70,33 @@ export function createWaterPools({ dem, groundY, scene, maxPools = 60 }) {
   // mid-arroyo dips and rocky depressions across most of the map.
   const minimaRadius = 3;
   const minDepth = 0.40;
-  const tinajas = [];
-  // 8 sample offsets at radius = the four cardinals + four diagonals,
-  // unrolled for speed.
+  // 8 sample offsets at radius = the four cardinals + four diagonals.
   const ringOffsets = [
     [ minimaRadius, 0], [-minimaRadius, 0], [0,  minimaRadius], [0, -minimaRadius],
     [ minimaRadius,  minimaRadius], [-minimaRadius,  minimaRadius],
     [ minimaRadius, -minimaRadius], [-minimaRadius, -minimaRadius],
   ];
-  // Require *most* neighbours higher (≥6 of 8) but not strictly all. This
-  // catches concave bowls without missing those bordered by one slightly
-  // lower cell on a downhill slope.
-  for (let j = minimaRadius; j < H - minimaRadius; j++) {
-    for (let i = minimaRadius; i < W - minimaRadius; i++) {
-      const z = dem.data[j * W + i];
-      let sum = 0;
-      let higherCount = 0;
-      for (let k = 0; k < ringOffsets.length; k++) {
-        const nz = dem.data[(j + ringOffsets[k][1]) * W + (i + ringOffsets[k][0])];
-        sum += nz;
-        if (nz > z) higherCount++;
-      }
-      if (higherCount < 6) continue;
-      const meanRing = sum / ringOffsets.length;
-      const depth = meanRing - z;
-      if (depth < minDepth) continue;
-      tinajas.push({ i, j, z, depth, kind: 'tinaja' });
+  // Require *most* neighbours higher (≥6 of 8) but not strictly all — catches
+  // concave bowls without missing those bordered by one slightly lower cell
+  // on a downhill slope.
+  const tinajaCells = tq.findCells(c => {
+    let sum = 0, higherCount = 0;
+    for (let k = 0; k < ringOffsets.length; k++) {
+      const nz = c.neighbourHeight(ringOffsets[k][0], ringOffsets[k][1]);
+      sum += nz;
+      if (nz > c.height) higherCount++;
     }
-  }
+    return higherCount >= 6 && (sum / ringOffsets.length - c.height) >= minDepth;
+  }, { margin: minimaRadius });
+  // Re-derive the per-cell depth on the keeps. Cheap (these are sparse) and
+  // keeps findCells's result type a clean snapshot.
+  const tinajas = tinajaCells.map(c => {
+    const meanRing = ringOffsets.reduce(
+      (s, [di, dj]) => s + tq.cellHeight(c.i + di, c.j + dj),
+      0
+    ) / ringOffsets.length;
+    return { i: c.i, j: c.j, z: c.height, depth: meanRing - c.height, kind: 'tinaja' };
+  });
   // Greedy spatial spread: thin out tinajas that are within `spreadRadius`
   // of an already-kept one, deepest first. This keeps tinajas spread across
   // the map rather than clustering in a few deep canyons.
@@ -152,11 +152,8 @@ export function createWaterPools({ dem, groundY, scene, maxPools = 60 }) {
   let vi = 0, ti = 0;
   for (let pi = 0; pi < pools.length; pi++) {
     const p = pools[pi];
-    const cellI = p.i;
-    const cellJ = p.j;
-    const wx = (cellI / (W - 1) - 0.5) * dem.worldWidth;
-    const wz = (cellJ / (H - 1) - 0.5) * dem.worldHeight;
-    const groundLow = groundY(wx, wz);
+    const { x: wx, z: wz } = tq.cellToWorld(p.i, p.j);
+    const groundLow = tq.sampleGroundY(wx, wz);
     const surfaceY = groundLow + 0.32;       // just above the bottom cell
     // River pools: radius derived from the cluster spread (cells × pixelSize).
     // Tinajas: precomputed `r` is already in metres.
