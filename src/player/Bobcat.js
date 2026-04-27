@@ -19,6 +19,47 @@ export async function loadBobcat({ url = '/assets/bobcat.glb', onProgress } = {}
 
 function buildController(gltf) {
   const root = gltf.scene;
+
+  // The retargeted GLB carries baseColor textures whose linear values are
+  // dark; with our restrained lighting they read as a black silhouette. Lift
+  // them by tweaking each material as we traverse: brighten baseColor, drop
+  // metalness, soften roughness slightly, and add a small emissive so the
+  // unlit side of the body never crushes to pure black.
+  const tmpCol = new THREE.Color();
+  root.traverse(o => {
+    if (!o.isMesh && !o.isSkinnedMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      // The Quaternius/retarget pipeline gave us a baked baseColor texture
+      // that's just dark bobcat fur. Three's MeshStandardMaterial multiplies
+      // texture × color × incident light; with our restrained sun + small
+      // ambient the result reads as black. We compensate by:
+      //   - leaving texture and color at identity,
+      //   - using the texture itself as an emissive map so the unlit side
+      //     never drops below a usable brightness floor.
+      if ('metalness' in m) m.metalness = 0.0;
+      if ('roughness' in m) m.roughness = Math.min(1, (m.roughness ?? 0.6) + 0.05);
+      // Lift the base-colour factor — Three accepts > 1 even though glTF on
+      // disk doesn't, so this is a runtime-only brightness multiplier.
+      if (m.color) m.color.setScalar(1.85);
+      // And use the diffuse texture as an emissive map so the unlit side
+      // doesn't crush. Combined the two roughly double the bobcat's apparent
+      // luminance.
+      if (m.map && m.emissive) {
+        m.emissiveMap = m.map;
+        m.emissive.setRGB(1, 0.94, 0.82);
+        m.emissiveIntensity = 1.65;
+      } else if (m.emissive) {
+        m.emissive.setRGB(0.55, 0.5, 0.4);
+        m.emissiveIntensity = 1.4;
+      }
+      m.needsUpdate = true;
+    }
+    o.castShadow = false;
+    o.receiveShadow = false;
+  });
+
   // Compute pre-scale bbox so we can size the model first.
   const bbox = new THREE.Box3().setFromObject(root);
   const size = bbox.getSize(new THREE.Vector3());
@@ -44,17 +85,38 @@ function buildController(gltf) {
   const pivot = new THREE.Group();
   pivot.add(root);
 
-  // Animations
+  // Animations — Quaternius retargeted skeleton has Idle / Walk / WalkSlow /
+  // Run / Jump / Death NLA tracks. We blend Idle ↔ WalkSlow ↔ Walk ↔ Run by
+  // speed, leaving Jump and Death as one-shots the controller can fire.
   let mixer = null;
-  let actions = {};
+  const actions = {};
   if (gltf.animations && gltf.animations.length) {
     mixer = new THREE.AnimationMixer(root);
     for (const clip of gltf.animations) {
-      actions[clip.name.toLowerCase()] = mixer.clipAction(clip);
+      const a = mixer.clipAction(clip);
+      a.setLoop(THREE.LoopRepeat);
+      a.enabled = true;
+      a.setEffectiveWeight(0);
+      a.setEffectiveTimeScale(1);
+      a.play();
+      actions[clip.name.toLowerCase()] = a;
     }
-    const first = Object.values(actions)[0];
-    if (first) { first.play(); first.setLoop(THREE.LoopRepeat); }
   }
+  // Aliases so callers can use friendly names regardless of clip casing.
+  function pickAction(...names) {
+    for (const n of names) {
+      const a = actions[n.toLowerCase()];
+      if (a) return a;
+    }
+    return null;
+  }
+  const idle    = pickAction('idle');
+  const walkS   = pickAction('walkslow', 'walk_slow');
+  const walk    = pickAction('walk');
+  const run     = pickAction('run', 'sprint');
+  const jump    = pickAction('jump');
+  const death   = pickAction('death', 'die');
+  if (idle)  idle.setEffectiveWeight(1);  // start in idle
 
   let groundFn = (x, z) => 0;
   let gaitClock = 0;
@@ -148,12 +210,33 @@ function buildController(gltf) {
     pivot.quaternion.slerp(tmpQuat, Math.min(1, dt * 10));
     state.forward.copy(tmpFwdYaw);
 
-    if (mixer) mixer.update(dt);
-    else {
-      // Procedural gait: the GLB is one rigid mesh, so we animate the whole
-      // body. Speed drives gait frequency; idle gets a slow chest-rise breath.
+    if (mixer) {
+      // Cross-fade idle / slow-walk / walk / run by current speed.
+      const v = state.speed;
+      // Cross-fade boundaries (m/s):
+      //   v=0       → idle 1
+      //   v≈1.0     → walkSlow 1
+      //   v≈3.2     → walk 1 (walkSpeed)
+      //   v≈8       → run 1
+      //  >8         → run 1 (capped)
+      const wIdle = clamp01(1 - v / 0.8);
+      const wWalkS = clamp01(1 - Math.abs(v - 1.6) / 1.6);
+      const wWalk  = clamp01(1 - Math.abs(v - 3.6) / 2.4);
+      const wRun   = clamp01((v - 4.0) / 3.0);
+      const total = wIdle + wWalkS + wWalk + wRun + 1e-6;
+      if (idle)  idle.setEffectiveWeight(wIdle / total);
+      if (walkS) walkS.setEffectiveWeight(wWalkS / total);
+      if (walk)  walk.setEffectiveWeight(wWalk / total);
+      if (run)   run.setEffectiveWeight(wRun / total);
+      // Slightly speed up the run clip when actually sprinting so the gait
+      // matches forward velocity instead of looking under-cranked.
+      if (run)  run.setEffectiveTimeScale(0.9 + 0.6 * (state.speed / state.runSpeed));
+      if (walk) walk.setEffectiveTimeScale(0.85 + 0.4 * (state.speed / state.walkSpeed));
+      mixer.update(dt);
+    } else {
+      // Procedural fallback if the GLB has no animation (e.g. unrigged build).
       const speedT = Math.min(1, state.speed / state.runSpeed);
-      const gaitFreq = THREE.MathUtils.lerp(2.0, 12.0, speedT); // breath → gallop
+      const gaitFreq = THREE.MathUtils.lerp(2.0, 12.0, speedT);
       const gaitPhase = (gaitClock += dt * gaitFreq);
       const bob   = Math.sin(gaitPhase) * THREE.MathUtils.lerp(0.005, 0.07, speedT);
       const pitch = Math.sin(gaitPhase) * THREE.MathUtils.lerp(0.0,  0.10, speedT);
@@ -163,6 +246,8 @@ function buildController(gltf) {
       root.rotation.z = roll;
     }
   }
+
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
   // Return state itself (not a spread) so live primitives — speed, yaw — stay
   // in sync with the controller's internal updates instead of freezing at the
