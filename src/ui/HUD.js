@@ -67,7 +67,29 @@ export function createHUD({ dem, water }) {
     }
   }
 
-  function update({ playerYaw, playerPos, fps }) {
+  // Action prompt that appears when the bobcat can interact with something
+  // nearby (water pools first, more later). Stamped panel with the same
+  // chiselled bevel as the rest of the HUD; lives at the bottom-centre.
+  const promptEl = document.createElement('div');
+  promptEl.id = 'action-prompt';
+  promptEl.className = 'panel';
+  promptEl.style.cssText = [
+    'position:absolute',
+    'left:50%; bottom:28px',
+    'transform:translateX(-50%)',
+    'padding:10px 18px',
+    'font-family:Work Sans, sans-serif',
+    'font-weight:700; font-size:12px; letter-spacing:0.36em',
+    'color:var(--ui-tan)',
+    'text-transform:uppercase',
+    'text-shadow:1px 1px 0 #000',
+    'opacity:0; transition:opacity 0.18s ease',
+    'pointer-events:none',
+  ].join(';');
+  promptEl.textContent = 'DRINK [E]';
+  document.getElementById('hud').appendChild(promptEl);
+
+  function update({ playerYaw, playerPos, fps, prompt }) {
     // Compass: when player faces +Z (yaw=0), 'N' should be centered.
     // Strip is 220px wide. We position so middle index of stripe ('N' in second copy) sits centered minus yaw offset.
     const centerOffset = -((points.length + 4) * 60 - 110); // start centered on second-block 'N'
@@ -93,6 +115,14 @@ export function createHUD({ dem, water }) {
 
     if (fpsReadout && Number.isFinite(fps)) {
       fpsReadout.textContent = String(Math.round(fps)).padStart(3, '0');
+    }
+
+    // Prompt: show when an interaction is available; fade out otherwise.
+    if (prompt) {
+      promptEl.textContent = prompt;
+      promptEl.style.opacity = '1';
+    } else {
+      promptEl.style.opacity = '0';
     }
   }
 

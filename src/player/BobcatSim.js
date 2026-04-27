@@ -36,6 +36,19 @@ export function createBobcatSim({ pivot, support }) {
     onJumpStart: null,    // (pos, jumpsLeft) => void — main.js wires dust here
     onJumpLand: null,
     setGroundFn(fn) { groundFn = fn; },
+    // Drink state. main.js sets `canDrink` each frame from pool proximity;
+    // pressing E (inputs.drinkPressed) starts a 2-second drink during which
+    // the cat is locked in place. `hydration` is informational for now —
+    // ticks down slowly, refills on drink. Future systems (thirst-driven
+    // navigation, etc.) read it.
+    canDrink: false,
+    nearestPool: null,    // { x, y, z, r } or null
+    isDrinking: false,
+    drinkTimer: 0,
+    drinkDuration: 2.0,
+    hydration: 1.0,
+    onDrinkStart: null,
+    onDrinkEnd: null,
   };
 
   let groundFn = (x, z) => 0;
@@ -51,9 +64,34 @@ export function createBobcatSim({ pivot, support }) {
   const tmpQuat     = new THREE.Quaternion();
 
   function update(dt, inputs, dem, rig) {
+    // ---- drink state machine ------------------------------------------
+    // E starts a drink when in range; mid-drink, all movement input is
+    // ignored and the cat is pinned in place until the timer elapses.
+    if (state.isDrinking) {
+      state.drinkTimer -= dt;
+      if (state.drinkTimer <= 0) {
+        state.isDrinking = false;
+        state.hydration = Math.min(1, state.hydration + 0.5);
+        if (state.onDrinkEnd) state.onDrinkEnd(state.position);
+      }
+    } else if (inputs.drinkPressed && state.canDrink) {
+      state.isDrinking = true;
+      state.drinkTimer = state.drinkDuration;
+      // Face the pool while drinking — looks intentional.
+      if (state.nearestPool) {
+        const dx = state.nearestPool.x - state.position.x;
+        const dz = state.nearestPool.z - state.position.z;
+        if (dx * dx + dz * dz > 0.01) state.yaw = Math.atan2(dx, dz);
+      }
+      if (state.onDrinkStart) state.onDrinkStart(state.position);
+    }
+
+    // Slow ambient hydration loss — won't matter until something reads it.
+    state.hydration = Math.max(0, state.hydration - dt * 0.005);
+
     // ---- yaw + horizontal speed ----------------------------------------
-    const fwd    = inputs.move.y;
-    const strafe = inputs.move.x;
+    const fwd    = state.isDrinking ? 0 : inputs.move.y;
+    const strafe = state.isDrinking ? 0 : inputs.move.x;
     const wantMove = (fwd !== 0 || strafe !== 0);
 
     if (wantMove) {
@@ -71,7 +109,7 @@ export function createBobcatSim({ pivot, support }) {
     // Each press consumes one of jumpsRemaining. The first jump leaves the
     // ground; subsequent presses while airborne are double-jumps. The
     // second is slightly weaker so the bobcat doesn't rocket into the sky.
-    if (inputs.jumpPressed && state.jumpsRemaining > 0) {
+    if (inputs.jumpPressed && state.jumpsRemaining > 0 && !state.isDrinking) {
       const isFirst = state.jumpsRemaining === state.maxJumps;
       state.airborne = true;
       state.vy = state.jumpInitialVy * (isFirst ? 1.0 : 0.85);

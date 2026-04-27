@@ -24,6 +24,7 @@ export function createInput() {
         sprint: keys.has('ShiftLeft') || keys.has('ShiftRight'),
         jumpPressed: justPressed.has('Space'),
         toggleNightVision: justPressed.has('KeyN'),
+        drinkPressed: justPressed.has('KeyE'),
         cameraYaw
       };
       justPressed.clear();

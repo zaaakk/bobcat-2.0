@@ -3,13 +3,21 @@ import * as THREE from 'three';
 /**
  * Builds the merged water-disc mesh + shader from a list of pools.
  *
- * Pure rendering: takes the analysis output (Array<{x, y, z, r, kind, depth}>)
- * and produces a single drawcall covering all pools. No DEM access, no
- * spatial logic — that lives in WaterAnalysis.
+ * Pure rendering: takes the analysis output (Array<{x, y, z, r, depth}>) and
+ * produces a single drawcall covering all pools. No DEM access, no spatial
+ * logic — that lives in WaterAnalysis.
  *
- * Each pool is a 32-segment disc (1 centre + SEGMENTS+1 rim verts). Per-vertex
- * `aDepth` is 1 at centre / 0 at rim, used for shimmer + alpha falloff. Per-
- * pool `aSeed` staggers ripple phase.
+ * Shading model — Devils-River-ish:
+ *   • Body colour: green-blue tint, shallow at edges → deep at centre.
+ *   • Surface ripples: layered sin's perturbing the normal, used for both
+ *     reflection direction and specular highlight.
+ *   • Sky reflection: blend env state (sunColor + skyTop + haze) along the
+ *     reflection direction. Cheap stand-in for a real cubemap reflection
+ *     and stays in sync with the day/night cycle.
+ *   • Fresnel: more reflection at glancing angles, more body at top-down —
+ *     the "see-through-the-pool-when-overhead" feel.
+ *   • Shoreline: rim vertices keep their depth=0 → mostly transparent body,
+ *     smooth shoreline blend.
  */
 export function createWaterRenderer({ pools, scene }) {
   if (!pools.length) {
@@ -52,7 +60,6 @@ export function createWaterRenderer({ pools, scene }) {
       aSeed[vi] = seed;
       vi++;
     }
-    // triangles: fan from centre
     for (let s = 0; s < SEGMENTS; s++) {
       indices[ti * 3 + 0] = centreIdx;
       indices[ti * 3 + 1] = rimStart + s;
@@ -70,10 +77,14 @@ export function createWaterRenderer({ pools, scene }) {
 
   const uniforms = {
     uTime:     { value: 0 },
-    uShallow:  { value: new THREE.Color('#7ab9c5') },
-    uDeep:     { value: new THREE.Color('#1f3548') },
+    // Devils River palette: pale green-teal shallow, deep teal-blue centre.
+    uShallow:  { value: new THREE.Color('#9fd6c8') },
+    uDeep:     { value: new THREE.Color('#1d3a4a') },
     uSunDir:   { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
-    uSunColor: { value: new THREE.Color(1, 0.96, 0.85) }
+    uSunColor: { value: new THREE.Color(1, 0.96, 0.85) },
+    // Sky reflection sources. Updated each frame from env state.
+    uSkyTop:   { value: new THREE.Color('#74c2ff') },
+    uHaze:     { value: new THREE.Color('#94dcff') },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -92,7 +103,7 @@ export function createWaterRenderer({ pools, scene }) {
         vec3 p = position;
         // Subtle vertex bob — small wave on centre, none at rim (preserves
         // shoreline). Per-pool seed staggers wave phase.
-        p.y += sin(uTime * 1.6 + aSeed * 4.0 + p.x * 0.3 + p.z * 0.3) * 0.03 * aDepth;
+        p.y += sin(uTime * 1.6 + aSeed * 4.0 + p.x * 0.3 + p.z * 0.3) * 0.025 * aDepth;
         vec4 wp = modelMatrix * vec4(p, 1.0);
         vWorldPos = wp.xyz;
         vDepth = aDepth;
@@ -106,24 +117,60 @@ export function createWaterRenderer({ pools, scene }) {
       varying float vSeed;
       varying vec3 vWorldPos;
       uniform float uTime;
-      uniform vec3 uShallow, uDeep, uSunDir, uSunColor;
-      float ripple(vec3 p, float t) {
-        return sin(p.x * 0.9 + t * 1.7) * 0.5 +
-               sin(p.z * 1.1 + t * 2.3) * 0.5 +
-               sin((p.x + p.z) * 0.4 + t * 0.7) * 0.5;
+      uniform vec3 uShallow, uDeep, uSunDir, uSunColor, uSkyTop, uHaze;
+
+      // Two-octave rippled normal. Reused for reflection direction and spec.
+      vec3 surfaceNormal(vec3 p, float t, float seedPhase) {
+        float n1 = sin(p.x * 0.9 + t * 1.7 + seedPhase) * 0.5
+                 + sin(p.z * 1.1 + t * 2.3 + seedPhase * 1.3) * 0.5;
+        float n2 = sin((p.x + p.z) * 1.8 + t * 3.1) * 0.25
+                 + sin((p.x - p.z) * 1.5 + t * 2.7) * 0.25;
+        float dx = (n1 + n2) * 0.18;
+        float dz = (n1 - n2) * 0.16;
+        return normalize(vec3(dx, 1.0, dz));
       }
+
+      // Cheap sky lookup along a view direction. Mixes haze (low) → top (high)
+      // so reflections of upward-looking rays get the zenith blue, glancing
+      // rays get horizon haze.
+      vec3 skyAlong(vec3 dir) {
+        float h = clamp(dir.y, 0.0, 1.0);
+        return mix(uHaze, uSkyTop, h);
+      }
+
       void main() {
-        // Body colour: deep at centre, pale teal at edges.
-        vec3 base = mix(uShallow, uDeep, vDepth);
-        // Sunlight kick on a perturbed normal — fakes specular twinkle.
-        float r = ripple(vWorldPos, uTime + vSeed);
-        vec3 nrm = normalize(vec3(r * 0.3, 1.0, r * 0.3 * vDepth));
-        float spec = pow(max(dot(nrm, normalize(uSunDir)), 0.0), 24.0);
-        base += uSunColor * spec * 0.65;
-        float alpha = 0.55 + vDepth * 0.30;
-        gl_FragColor = vec4(base, alpha);
+        vec3 nrm = surfaceNormal(vWorldPos, uTime, vSeed * 0.5);
+        vec3 viewDir = normalize(vWorldPos - cameraPosition);
+
+        // Body colour — pale teal at the rim, deep at the centre.
+        vec3 body = mix(uShallow, uDeep, vDepth);
+
+        // Reflection sample along the reflected view direction.
+        vec3 reflDir = reflect(viewDir, nrm);
+        vec3 reflColor = skyAlong(reflDir);
+
+        // Fresnel — Schlick approximation with water's ~2% normal reflectance,
+        // saturating to ~80% at glancing angles.
+        float cosTheta = clamp(-dot(viewDir, nrm), 0.0, 1.0);
+        float fresnel = 0.02 + 0.98 * pow(1.0 - cosTheta, 5.0);
+        fresnel = clamp(fresnel, 0.04, 0.85);
+
+        // Specular highlight on the perturbed normal.
+        vec3 sunReflDir = reflect(-uSunDir, nrm);
+        float sunDot = max(dot(-viewDir, sunReflDir), 0.0);
+        float spec = pow(sunDot, 80.0);
+
+        vec3 col = mix(body, reflColor, fresnel);
+        col += uSunColor * spec * 1.4;
+
+        // Alpha — clearer at top-down (low Fresnel) so the bottom shows through;
+        // more opaque at glancing angles where reflection takes over.
+        float alpha = mix(0.42, 0.85, vDepth);
+        alpha = mix(alpha, 0.92, fresnel * 0.55);
+
+        gl_FragColor = vec4(col, alpha);
       }
-    `
+    `,
   });
 
   const mesh = new THREE.Mesh(geom, material);
@@ -131,10 +178,20 @@ export function createWaterRenderer({ pools, scene }) {
   mesh.renderOrder = 1;     // after terrain so transparency sorts cleanly
   scene.add(mesh);
 
-  function update(dt, t, sunDir, sunColor) {
+  /**
+   * Per-frame tick. ctx fields used:
+   *   ctx.sunDir, ctx.sunColor — for spec.
+   *   ctx.skyTop, ctx.haze     — for sky reflection.
+   * Falls back to the shader's defaults when a field is missing.
+   */
+  function update(dt, t, ctx) {
     uniforms.uTime.value = t;
-    if (sunDir)   uniforms.uSunDir.value.copy(sunDir);
-    if (sunColor) uniforms.uSunColor.value.copy(sunColor);
+    if (ctx) {
+      if (ctx.sunDir)   uniforms.uSunDir.value.copy(ctx.sunDir);
+      if (ctx.sunColor) uniforms.uSunColor.value.copy(ctx.sunColor);
+      if (ctx.skyTop)   uniforms.uSkyTop.value.copy(ctx.skyTop);
+      if (ctx.haze)     uniforms.uHaze.value.copy(ctx.haze);
+    }
   }
 
   function dispose() {

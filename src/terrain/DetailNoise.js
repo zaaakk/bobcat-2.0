@@ -79,6 +79,12 @@ export function generateDetailNoise({
   // structure on actual ridges. Setting both to 0 disables the mask.
   maskLo         = 0.20,
   maskHi         = 0.55,
+  // Water-pool exclusion list. After the broad ridge is baked, we scale the
+  // ridge value to 0 within each pool's radius (and blend smoothly out over
+  // poolFadeRadius beyond) so caprock bumps don't stick up through the
+  // water surface. Pools shape: { x, z, r } in world coords.
+  pools          = [],
+  poolFadeRadius = 5.0,
 } = {}) {
   const noise = createNoise2D(() => seed);
   const w = resolution, h = resolution;
@@ -118,8 +124,40 @@ export function generateDetailNoise({
     }
   }
 
+  // Pool exclusion: zero the broad ridge in a circle around each pool so
+  // the detail can't push bumps up through the water surface. Smoothstep
+  // fade over poolFadeRadius so the suppressed region tapers smoothly into
+  // the surrounding ridge.
+  if (pools.length) {
+    const texelSize = worldWidth / w;
+    for (const pool of pools) {
+      const fullRadius = pool.r + poolFadeRadius;
+      const cellRange = Math.ceil(fullRadius / texelSize) + 1;
+      const cu = (pool.x / worldWidth + 0.5) * w - 0.5;
+      const cv = (pool.z / worldHeight + 0.5) * h - 0.5;
+      const ci = Math.round(cu);
+      const cj = Math.round(cv);
+      for (let dj = -cellRange; dj <= cellRange; dj++) {
+        const j = cj + dj;
+        if (j < 0 || j >= h) continue;
+        const wz = ((j + 0.5) / h - 0.5) * worldHeight;
+        for (let di = -cellRange; di <= cellRange; di++) {
+          const i = ci + di;
+          if (i < 0 || i >= w) continue;
+          const wx = ((i + 0.5) / w - 0.5) * worldWidth;
+          const dist = Math.hypot(wx - pool.x, wz - pool.z);
+          if (dist >= fullRadius) continue;
+          // 0 inside the pool, 1 at the fade edge.
+          const t = Math.max(0, (dist - pool.r) / poolFadeRadius);
+          const fade = t * t * (3 - 2 * t);
+          data[j * w + i] *= fade;
+        }
+      }
+    }
+  }
+
   // GPU half-float quantisation, mirrored back to a Float32 view so CPU
-  // sampling sees the same values the shader sees.
+  // sampling sees the same values the shader sees (post-pool-exclusion).
   const halfData = new Uint16Array(data.length);
   const renderData = new Float32Array(data.length);
   for (let i = 0; i < data.length; i++) {

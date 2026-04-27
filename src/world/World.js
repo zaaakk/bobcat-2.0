@@ -13,6 +13,7 @@ import { placeVegetation } from '../vegetation/PlacementEngine.js';
 import { createInstancedPlants } from '../vegetation/InstancedPlants.js';
 import { SPECIES } from '../vegetation/species.js';
 
+import { findWaterPools } from './WaterAnalysis.js';
 import { createWaterPools } from './Water.js';
 
 /**
@@ -22,13 +23,18 @@ import { createWaterPools } from './Water.js';
  * player, mobs, environment/sky, or rendering — those compose with World
  * but live in their own modules.
  *
- * Lifecycle:
- *   const world = new World({ scene, renderer, onProgress });
- *   await world.init();          // loads DEM, builds meshes, places water + plants
- *   world.update(dt, t, ctx);    // ticks plants + water each frame
- *
- * `ctx` carries cross-cutting per-frame inputs (cameraPosition, sunDir,
- * sunColor) so World doesn't need to reach back into other systems.
+ * Init order matters because of cross-feature dependencies:
+ *   1. DEM loaded.
+ *   2. TerrainQuery built (without detail noise yet — pure DEM access).
+ *   3. Pool detection runs against base DEM. Pools are world-space points.
+ *   4. Detail noise generated WITH the pool list, suppressing the broad
+ *      ridge inside each pool's radius so caprock bumps don't push up
+ *      through the water surface.
+ *   5. TerrainQuery's detailNoise reference is filled in, so subsequent
+ *      groundY queries pick up the detail (everywhere except in pools).
+ *   6. Terrain mesh + detail patch created.
+ *   7. Water meshes built from the previously-detected pools.
+ *   8. Vegetation placed.
  */
 export class World {
   constructor({ scene, renderer, onProgress = () => {} }) {
@@ -36,10 +42,11 @@ export class World {
     this.renderer = renderer;
     this._onProgress = onProgress;
 
-    // Populated by init().
     this.dem = null;
     this.terrainQuery = null;
+    this.detailNoise = null;
     this.terrain = null;
+    this.detailPatch = null;
     this.water = null;
     this.plants = null;
     this.terrainSegments = 1280;
@@ -56,30 +63,39 @@ export class World {
       `elev ${this.dem.minZ.toFixed(0)}–${this.dem.maxZ.toFixed(0)}m`
     );
 
-    this._onProgress(0.40, 'Painting ground…');
+    const terrainPlaneSize = this.dem.worldWidth + this.terrainEdgePadding * 2;
+
+    // (Step 2) TerrainQuery without detail/patch, so pool detection sees
+    // the bare DEM. We mutate detailNoise + patchSpacing onto it later.
+    this.terrainQuery = new TerrainQuery({
+      dem: this.dem,
+      terrainPlaneSize,
+      terrainSegments: this.terrainSegments,
+    });
+
+    // (Step 3) Detect pool locations — strict bowl test.
+    this._onProgress(0.38, 'Surveying water…');
+    const pools = findWaterPools(this.terrainQuery, { maxPools: 30 });
+    console.log(`water: ${pools.length} bowl pools`);
+
+    // (Step 4) Detail noise, suppressed where the pools sit.
+    this._onProgress(0.42, 'Painting ground…');
     const heightTex = heightmapTexture(THREE, this.dem);
     const splatTex = generateSplatMap(this.dem, 1280);
-
     const ground = await loadGroundTextures(this.renderer);
 
-    // Sub-DEM detail: ridged-multifractal caprock bumps + elevation-keyed
-    // bedding-plane pulse. Reads as stratified limestone — sharp ridges,
-    // horizontal benches at fixed vertical intervals — rather than the
-    // smooth rolling blobs Perlin-style FBM produces. Sampled identically
-    // on GPU (vertex shader) and CPU (TerrainQuery.sampleHeight) so
-    // character grounding agrees with the rendered surface.
     this.detailNoise = generateDetailNoise({
       worldWidth:  this.dem.worldWidth,
       worldHeight: this.dem.worldHeight,
       resolution:  2048,
-      ridgeAmp:    3.0,
-      bedAmp:      2.0,
-      bedPeriod:   18.0,
-      bedWarpAmp:  6.0,
+      pools,                  // suppress broad ridge inside each pool
+      poolFadeRadius: 6.0,
     });
+    // (Step 5) Splice the freshly-baked noise into the existing query.
+    this.terrainQuery.detailNoise = this.detailNoise;
 
+    // (Step 6) Terrain meshes.
     this._onProgress(0.55, 'Building terrain mesh…');
-    const terrainPlaneSize = this.dem.worldWidth + this.terrainEdgePadding * 2;
     this.terrain = createTerrainMesh({
       dem: this.dem, heightTex, splatTex,
       groundTextures: ground.diffuse,
@@ -87,43 +103,27 @@ export class World {
       normalTex: ground.defaultNormal,
       detailNoise: this.detailNoise,
       segments: this.terrainSegments,
-      edgePadding: this.terrainEdgePadding
+      edgePadding: this.terrainEdgePadding,
     });
     this.scene.add(this.terrain.mesh);
 
-    // Detail patch — small high-res mesh that follows the player. Same
-    // height function as the base, so they're co-planar; detail noise
-    // fades at the patch edge so there's no seam. main.js calls
-    // world.updateDetailPatch(x, z) each frame.
     const patchSize = 150, patchResolution = 512;
     this.detailPatch = createDetailPatch({
       terrain: this.terrain,
       size: patchSize,
-      resolution: patchResolution
+      resolution: patchResolution,
     });
     this.scene.add(this.detailPatch.mesh);
-    const patchSpacing = patchSize / patchResolution;
+    this.terrainQuery.patchSpacing = patchSize / patchResolution;
 
-    // Single shared landscape-query layer. Every feature that needs to ask
-    // questions about the terrain (water, mobs, vegetation, spawn selection)
-    // goes through this — no direct dem.data[] reads outside DEMLoader.
-    this.terrainQuery = new TerrainQuery({
-      dem: this.dem,
-      terrainPlaneSize,
-      terrainSegments: this.terrainSegments,
-      detailNoise: this.detailNoise,
-      patchSpacing,
-    });
-
-    // Seasonal pools at low spots in the DEM. The bobcat can later drink
-    // from nearby pools; positions are exposed via water.pools for proximity
-    // checks and HUD dots.
+    // (Step 7) Water — pools list is pre-computed so we just build the mesh.
     this.water = createWaterPools({
       terrainQuery: this.terrainQuery,
       scene: this.scene,
-      maxPools: 80
+      pools,
     });
 
+    // (Step 8) Vegetation.
     this._onProgress(0.65, 'Loading flora…');
     const atlas = await buildSpriteAtlas(SPECIES, 512);
 
@@ -134,7 +134,7 @@ export class World {
       cellSize: 4.0,
       globalDensity: 1.0,
       playRadius: 3500,
-      maxInstances: 1_000_000
+      maxInstances: 1_000_000,
     });
     console.log(`placed ${instances.count} plant instances`);
 
@@ -153,14 +153,15 @@ export class World {
   }
 
   /**
-   * Per-frame tick. ctx carries cross-cutting per-frame inputs so World
-   * doesn't have to reach back into the environment/lighting subsystem.
+   * Per-frame tick. ctx carries cross-cutting per-frame inputs:
    *   ctx.cameraPosition — Three.Vector3 of the camera (for plant LOD).
    *   ctx.sunDir         — Three.Vector3 (normalized) of sun direction.
    *   ctx.sunColor       — Three.Color of current sunlight.
+   *   ctx.skyTop         — Three.Color of zenith (water reflection).
+   *   ctx.haze           — Three.Color of horizon haze (water reflection).
    */
   update(dt, t, ctx) {
     this.plants.update(t, ctx.cameraPosition);
-    this.water.update(dt, t, ctx.sunDir, ctx.sunColor);
+    this.water.update(dt, t, ctx);
   }
 }

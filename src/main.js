@@ -332,6 +332,23 @@ async function main() {
 
     const inputs = input.sample(cam.yaw);
     if (inputs.toggleNightVision) nightVision.toggle();
+    // Find nearest water pool and gate the drink prompt on proximity. The
+    // sim itself reads `canDrink` + `nearestPool` to decide whether E
+    // triggers a drink and which pool to face. Distance is measured to the
+    // pool's edge (not centre) so a 5m-radius pool is reachable from 1.5m
+    // outside the rim, not 1.5m from the centre.
+    {
+      let nearestDist = Infinity;
+      let nearestPool = null;
+      for (const pool of world.water.pools) {
+        const dx = bobcat.position.x - pool.x;
+        const dz = bobcat.position.z - pool.z;
+        const d = Math.hypot(dx, dz) - pool.r;
+        if (d < nearestDist) { nearestDist = d; nearestPool = pool; }
+      }
+      bobcat.canDrink = nearestDist < 1.5;
+      bobcat.nearestPool = bobcat.canDrink ? nearestPool : null;
+    }
     bobcat.update(dt, inputs, world.dem);
     cam.update(dt);
     dust.update(dt);
@@ -345,7 +362,9 @@ async function main() {
     world.update(dt, t, {
       cameraPosition: camera.position,
       sunDir: environment.state.sunDir,
-      sunColor: environment.state.sunColor
+      sunColor: environment.state.sunColor,
+      skyTop: environment.state.skyTop,
+      haze: environment.state.haze,
     });
     // Slide the high-res detail patch to centre on the bobcat each frame.
     world.updateDetailPatch(bobcat.position.x, bobcat.position.z);
@@ -391,7 +410,10 @@ async function main() {
       }
     }
 
-    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps });
+    const prompt = bobcat.isDrinking ? 'DRINKING…'
+                 : bobcat.canDrink   ? 'DRINK [E]'
+                 : null;
+    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps, prompt });
     if (typeof window !== 'undefined') {
       window.__bobcatPos = {
         bobcat: { x: bobcat.position.x, y: bobcat.position.y, z: bobcat.position.z, yaw: bobcat.yaw },

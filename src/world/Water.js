@@ -5,30 +5,28 @@ import { createWaterRenderer } from './WaterRenderer.js';
  * Public entry for the water feature. Three steps, each in its own module:
  *
  *   1. analysis  — findWaterPools(terrainQuery)         WaterAnalysis.js
- *   2. (future)  — carve basins into a sidecar displacement layer so each
- *                  pool sits in a real depression instead of perching on a
- *                  slope shelf. Will go between (1) and (3).
+ *   2. detail    — DetailNoise suppresses caprock bumps inside pool radii so
+ *                  the surface stays clean (handled in World.init via the
+ *                  `pools` arg to generateDetailNoise). The pool list is
+ *                  passed in pre-detected so we don't repeat the work.
  *   3. renderer  — createWaterRenderer({ pools, scene }) WaterRenderer.js
  *
  * Returns { mesh, pools, update, dispose } — `pools` is the analysis output
- * (world-space {x,y,z,r,kind,depth}) so HUD/interaction can query it without
+ * (world-space {x,y,z,r,depth}) so HUD/interaction can query it without
  * touching the renderer.
  */
-export function createWaterPools({ terrainQuery, scene, maxPools = 60 }) {
-  const pools = findWaterPools(terrainQuery, { maxPools });
-  const rivers = pools.filter(p => p.kind === 'river').length;
-  const tinajas = pools.filter(p => p.kind === 'tinaja').length;
-  console.log(`water: ${rivers} river pools + ${tinajas} tinajas`);
+export function createWaterPools({ terrainQuery, scene, pools = null, maxPools = 30 }) {
+  const detected = pools ?? findWaterPools(terrainQuery, { maxPools });
 
-  if (!pools.length) {
+  if (!detected.length) {
     return { mesh: null, pools: [], update: () => {}, dispose: () => {} };
   }
 
-  const renderer = createWaterRenderer({ pools, scene });
+  const renderer = createWaterRenderer({ pools: detected, scene });
   return {
     mesh: renderer.mesh,
-    pools,
+    pools: detected,
     update: renderer.update,
-    dispose: renderer.dispose
+    dispose: renderer.dispose,
   };
 }
