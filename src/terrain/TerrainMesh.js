@@ -7,7 +7,7 @@ import * as THREE from 'three';
  * Vertex grid is fixed (segments x segments); the heightmap texture is sampled in
  * the vertex shader. Splatmap blends four ground textures in the fragment shader.
  */
-export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, groundNormals, normalTex, segments = 512, edgePadding = 8000 }) {
+export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, groundNormals, normalTex, detailNoise = null, segments = 512, edgePadding = 8000 }) {
   const planeWidth = dem.worldWidth + edgePadding * 2;
   const planeHeight = dem.worldHeight + edgePadding * 2;
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, segments, segments);
@@ -47,7 +47,21 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uLanternPos:   { value: new THREE.Vector3() },
     uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
-    uLanternIntensity: { value: 0.0 }
+    uLanternIntensity: { value: 0.0 },
+    // Sub-DEM detail: ridged-multifractal lookup (caprock bumps) + an
+    // elevation-keyed bedding pulse computed in the shader (horizontal
+    // bench lines). uDetailHas gates everything so a build without a
+    // detail texture compiles + runs cleanly (the sampler must still
+    // bind to *something*, so we hand it the heightmap as a fallback).
+    uDetailTex:        { value: detailNoise ? detailNoise.texture : heightTex },
+    uDetailWorldSize:  { value: detailNoise
+        ? new THREE.Vector2(detailNoise.worldWidth, detailNoise.worldHeight)
+        : new THREE.Vector2(1, 1) },
+    uRidgeAmp:         { value: detailNoise ? detailNoise.ridgeAmp   : 0.0 },
+    uBedAmp:           { value: detailNoise ? detailNoise.bedAmp     : 0.0 },
+    uBedPeriod:        { value: detailNoise ? detailNoise.bedPeriod  : 18.0 },
+    uBedWarpAmp:       { value: detailNoise ? detailNoise.bedWarpAmp : 0.0 },
+    uDetailHas:        { value: detailNoise ? 1.0 : 0.0 }
   };
 
   const material = new THREE.ShaderMaterial({
@@ -67,9 +81,16 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
 const VERT = /* glsl */`
   precision highp float;
   uniform sampler2D uHeightmap;
+  uniform sampler2D uDetailTex;
   uniform vec2 uDemSize;
+  uniform vec2 uDetailWorldSize;
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
+  uniform float uRidgeAmp;
+  uniform float uBedAmp;
+  uniform float uBedPeriod;
+  uniform float uBedWarpAmp;
+  uniform float uDetailHas;
 
   varying vec3 vWorldPos;
   varying vec2 vUv;
@@ -79,19 +100,38 @@ const VERT = /* glsl */`
   varying vec3 vBitangent;
   varying float vEdgeFade;
 
-  float sampleH(vec2 worldXZ) {
-    vec2 uv = (worldXZ / uDemSize) + 0.5;
+  // Detail is added on top of every DEM sample so the rendered surface IS
+  // (DEM + detail), and the per-vertex normal computed below picks up the
+  // perturbation from the detail field automatically.
+  //
+  // Two layers, both unsigned (always lift the surface):
+  //   1. ridged-multifractal lookup     — caprock bumps (texture)
+  //   2. elevation-keyed bedding pulse  — horizontal bench lines (sin of
+  //                                       hDem, domain-warped by the ridge
+  //                                       field so they wander naturally)
+  float sampleDetail(vec2 worldXZ, float hDem) {
+    if (uDetailHas < 0.5) return 0.0;
+    vec2 uv = (worldXZ / uDetailWorldSize) + 0.5;
     uv = clamp(uv, vec2(0.0), vec2(1.0));
-    return texture2D(uHeightmap, uv).r;
+    float ridge = texture2D(uDetailTex, uv).r;             // [0, 1]
+    float warpedH = hDem + ridge * uBedWarpAmp;
+    float bedTau  = 6.283185307179586 / uBedPeriod;
+    float pulse   = max(0.0, sin(warpedH * bedTau) - 0.5) * 2.0;
+    return ridge * uRidgeAmp + pulse * uBedAmp;
   }
 
   float sampleHEdge(vec2 worldXZ) {
-    float h = sampleH(worldXZ);
+    // Drop both the DEM and the detail through the edge fade so the padding
+    // ring stays clean (no stray noise outside the world).
+    vec2 uv = (worldXZ / uDemSize) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    float hDem = texture2D(uHeightmap, uv).r;
     vec2 inside = abs(worldXZ) - uDemSize * 0.5;
     float outside = max(max(inside.x, inside.y), 0.0);
     float ef = clamp(outside / 4000.0, 0.0, 1.0);
     ef = ef * ef;
-    return mix(h, h - 80.0, ef);
+    float baseH = mix(hDem, hDem - 80.0, ef);
+    return baseH + sampleDetail(worldXZ, hDem) * (1.0 - ef);
   }
 
   void main() {
@@ -103,9 +143,12 @@ const VERT = /* glsl */`
     float edgeFade = clamp(outside / 4000.0, 0.0, 1.0);
     edgeFade = edgeFade * edgeFade;
 
-    float h = sampleH(worldXZ);
-    h = mix(h, h - 80.0, edgeFade);
-    p.y = h;
+    // Use the edge-aware sampler for the centre too, so detail noise is
+    // gated by edgeFade the same way it is when sampled for the normal-
+    // computing neighbours below — otherwise the centre's noise rides the
+    // -80m fade ramp while the neighbours don't, and the seam shows up as
+    // a lighting glitch at the DEM boundary.
+    p.y = sampleHEdge(worldXZ);
 
     // Per-vertex normal computed from heightmap sampled at mesh-vertex spacing —
     // this matches the rasterised surface (which is linear between vertices).

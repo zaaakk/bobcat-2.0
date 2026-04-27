@@ -25,10 +25,13 @@
  * Hold onto its (i, j, x, z, height) values, not the cell itself.
  */
 export class TerrainQuery {
-  constructor({ dem, terrainPlaneSize, terrainSegments }) {
+  constructor({ dem, terrainPlaneSize, terrainSegments, detailNoise = null }) {
     this.dem = dem;
     this.planeSize = terrainPlaneSize;
     this.segments = terrainSegments;
+    // Optional sub-DEM detail. When set, sampleHeight returns DEM + detail
+    // so groundY queries agree with the GPU's vertex displacement.
+    this.detailNoise = detailNoise;
   }
 
   get worldWidth()    { return this.dem.worldWidth; }
@@ -43,9 +46,19 @@ export class TerrainQuery {
 
   /**
    * Bilinear DEM height at world (x, z). Half-pixel-correct so it matches
-   * the GPU's texture sampling convention.
+   * the GPU's texture sampling convention. If a detail noise field is
+   * configured, its bilinear contribution is added on top — this keeps the
+   * sample in lockstep with the vertex shader's per-vertex displacement.
    */
   sampleHeight(x, z) {
+    const base = this._sampleDemHeight(x, z);
+    return this.detailNoise
+      ? base + this.sampleDetail(x, z)
+      : base;
+  }
+
+  /** DEM-only height (no detail). Useful for pre-detail analysis. */
+  _sampleDemHeight(x, z) {
     const dem = this.dem;
     const src = dem.renderData || dem.data;
     const u = (x / dem.worldWidth + 0.5) * dem.width - 0.5;
@@ -60,6 +73,58 @@ export class TerrainQuery {
     const h10 = src[cy0 * dem.width + cx1];
     const h01 = src[cy1 * dem.width + cx0];
     const h11 = src[cy1 * dem.width + cx1];
+    const h0 = h00 * (1 - fx) + h10 * fx;
+    const h1 = h01 * (1 - fx) + h11 * fx;
+    return h0 * (1 - fy) + h1 * fy;
+  }
+
+  /**
+   * Detail-noise displacement in metres at (x, z). Bilinear, half-pixel
+   * correct, samples renderData (post-half-float quantisation) so values
+   * match the GPU's texture lookup bit-for-bit.
+   *
+   * Two layers, both sampled the same way the shader does them:
+   *
+   *   1. Ridged multifractal — the baked texture, in [0, 1]. Multiplied by
+   *      ridgeAmp to give caprock-style metre-scale bumps.
+   *   2. Bedding pulse — sin(elevation/period) thresholded; gives horizontal
+   *      bench lines at fixed vertical intervals. Domain-warped by the
+   *      ridge field so the lines wander like real outcrops.
+   *
+   * Both layers are unsigned (always lift, never lower) so the surface
+   * gets bumpier without dipping below the DEM. Returns 0 with no detail.
+   *
+   * Note: the bedding pulse needs the *base* DEM height as input, not the
+   * already-displaced surface — otherwise we'd have a feedback loop. This
+   * matches the GPU shader, which reads hDem before adding the pulse.
+   */
+  sampleDetail(x, z) {
+    const dn = this.detailNoise;
+    if (!dn) return 0;
+    const ridge = this._sampleRidge01(x, z);
+    const baseDem = this._sampleDemHeight(x, z);
+    const warpedH = baseDem + ridge * dn.bedWarpAmp;
+    const bedTau = 6.283185307179586 / dn.bedPeriod;
+    const pulse = Math.max(0, Math.sin(warpedH * bedTau) - 0.5) * 2;
+    return ridge * dn.ridgeAmp + pulse * dn.bedAmp;
+  }
+
+  /** Bilinear lookup of the ridged FBM texture in [0, 1]. */
+  _sampleRidge01(x, z) {
+    const dn = this.detailNoise;
+    const src = dn.renderData;
+    const u = (x / dn.worldWidth  + 0.5) * dn.width  - 0.5;
+    const v = (z / dn.worldHeight + 0.5) * dn.height - 0.5;
+    const x0 = Math.floor(u), y0 = Math.floor(v);
+    const fx = u - x0, fy = v - y0;
+    const cx0 = clamp(x0, 0, dn.width - 1);
+    const cy0 = clamp(y0, 0, dn.height - 1);
+    const cx1 = clamp(x0 + 1, 0, dn.width - 1);
+    const cy1 = clamp(y0 + 1, 0, dn.height - 1);
+    const h00 = src[cy0 * dn.width + cx0];
+    const h10 = src[cy0 * dn.width + cx1];
+    const h01 = src[cy1 * dn.width + cx0];
+    const h11 = src[cy1 * dn.width + cx1];
     const h0 = h00 * (1 - fx) + h10 * fx;
     const h1 = h01 * (1 - fx) + h11 * fx;
     return h0 * (1 - fy) + h1 * fy;

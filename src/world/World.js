@@ -5,6 +5,7 @@ import { TerrainQuery } from '../terrain/TerrainQuery.js';
 import { generateSplatMap } from '../terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from '../terrain/TerrainMesh.js';
 import { loadGroundTextures } from '../terrain/GroundTextures.js';
+import { generateDetailNoise } from '../terrain/DetailNoise.js';
 
 import { buildSpriteAtlas } from '../vegetation/SpriteAtlas.js';
 import { placeVegetation } from '../vegetation/PlacementEngine.js';
@@ -60,6 +61,22 @@ export class World {
 
     const ground = await loadGroundTextures(this.renderer);
 
+    // Sub-DEM detail: ridged-multifractal caprock bumps + elevation-keyed
+    // bedding-plane pulse. Reads as stratified limestone — sharp ridges,
+    // horizontal benches at fixed vertical intervals — rather than the
+    // smooth rolling blobs Perlin-style FBM produces. Sampled identically
+    // on GPU (vertex shader) and CPU (TerrainQuery.sampleHeight) so
+    // character grounding agrees with the rendered surface.
+    this.detailNoise = generateDetailNoise({
+      worldWidth:  this.dem.worldWidth,
+      worldHeight: this.dem.worldHeight,
+      resolution:  2048,
+      ridgeAmp:    3.0,
+      bedAmp:      2.0,
+      bedPeriod:   18.0,
+      bedWarpAmp:  6.0,
+    });
+
     this._onProgress(0.55, 'Building terrain mesh…');
     const terrainPlaneSize = this.dem.worldWidth + this.terrainEdgePadding * 2;
     this.terrain = createTerrainMesh({
@@ -67,6 +84,7 @@ export class World {
       groundTextures: ground.diffuse,
       groundNormals:  ground.normals,
       normalTex: ground.defaultNormal,
+      detailNoise: this.detailNoise,
       segments: this.terrainSegments,
       edgePadding: this.terrainEdgePadding
     });
@@ -78,7 +96,8 @@ export class World {
     this.terrainQuery = new TerrainQuery({
       dem: this.dem,
       terrainPlaneSize,
-      terrainSegments: this.terrainSegments
+      terrainSegments: this.terrainSegments,
+      detailNoise: this.detailNoise,
     });
 
     // Seasonal pools at low spots in the DEM. The bobcat can later drink
