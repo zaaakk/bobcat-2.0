@@ -237,11 +237,11 @@ async function main() {
           });
           panelButton(el, 'Reset', () => {
             u.uRidgeAmp.value = 3.0;
-            u.uBedAmp.value = 2.0;
-            u.uBedPeriod.value = 18.0;
-            u.uBedWarpAmp.value = 6.0;
-            u.uFineAmp.value = 0.7;
-            u.uFineTileSize.value = 4.0;
+            u.uBedAmp.value = 2.3;
+            u.uBedPeriod.value = 20.0;
+            u.uBedWarpAmp.value = 20.7;
+            u.uFineAmp.value = 0.37;
+            u.uFineTileSize.value = 16.0;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           // Wireframe toggle — toggles on the base terrain AND the detail
