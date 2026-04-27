@@ -185,6 +185,64 @@ export class TerrainQuery {
     return dem.data[cj * dem.width + ci];
   }
 
+  /**
+   * Rejection-sample scattered world-space points matching the given filters.
+   * Useful for "spawn N things spread across the map, optionally not near
+   * some anchor / on flat ground / in a particular elevation band."
+   *
+   * Returns Array<{ x, y, z, slope }>. Each point has y = sampleGroundY,
+   * so callers can place meshes on the ground without re-sampling.
+   *
+   * If maxAttempts is exhausted before count is satisfied, returns whatever
+   * was found — caller decides whether to error.
+   *
+   * Options:
+   *   count          — how many points to return.
+   *   worldFraction  — stay inside (-w/2*frac, +w/2*frac) of the DEM extent.
+   *                    Default 0.85 keeps points clear of the edge fade.
+   *   awayFrom       — { x, z, distance } — reject points within `distance`
+   *                    metres of (x, z). Used to keep things off the spawn.
+   *   minSlope/maxSlope — slope-radian band. Default: any.
+   *   minElevation/maxElevation — height band in metres. Default: any.
+   *   maxAttempts    — give up after this many random rolls (default 200).
+   */
+  samplePoints({
+    count,
+    worldFraction = 0.85,
+    awayFrom = null,
+    minSlope = -Infinity,
+    maxSlope = Infinity,
+    minElevation = -Infinity,
+    maxElevation = Infinity,
+    maxAttempts = 200,
+  } = {}) {
+    if (!count || count <= 0) return [];
+    const out = [];
+    const halfW = this.dem.worldWidth * 0.5 * worldFraction;
+    const halfH = this.dem.worldHeight * 0.5 * worldFraction;
+    const minDist2 = awayFrom ? awayFrom.distance * awayFrom.distance : 0;
+
+    for (let attempt = 0; attempt < maxAttempts && out.length < count; attempt++) {
+      const x = (Math.random() * 2 - 1) * halfW;
+      const z = (Math.random() * 2 - 1) * halfH;
+      if (awayFrom) {
+        const dx = x - awayFrom.x, dz = z - awayFrom.z;
+        if (dx * dx + dz * dz < minDist2) continue;
+      }
+      const y = this.sampleGroundY(x, z);
+      if (y < minElevation || y > maxElevation) continue;
+      // Slope check is only worth running if the caller asked for one — it
+      // costs 4 sampleHeight calls.
+      let slope = 0;
+      if (minSlope > -Infinity || maxSlope < Infinity) {
+        slope = this.sampleSlope(x, z);
+        if (slope < minSlope || slope > maxSlope) continue;
+      }
+      out.push({ x, y, z, slope });
+    }
+    return out;
+  }
+
   /** Convert a DEM cell index to world (x, z). */
   cellToWorld(i, j) {
     const dem = this.dem;

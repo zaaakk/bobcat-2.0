@@ -130,22 +130,21 @@ async function main() {
       followLerp: 0.25
     });
   }
-  // Distant background kettles. Each anchored at a fixed spot in the desert,
-  // 2-3 birds per kettle. The player sees them as far-off circling shapes
-  // that grow if they wander toward them.
-  const distantKettles = 4;
-  for (let k = 0; k < distantKettles; k++) {
-    let kx, kz;
-    do {
-      kx = (Math.random() - 0.5) * world.dem.worldWidth * 0.85;
-      kz = (Math.random() - 0.5) * world.dem.worldHeight * 0.85;
-    } while (Math.hypot(kx - spawn.x, kz - spawn.z) < 600);
-    const ky = world.groundY(kx, kz);
+  // Distant background kettles. 4 anchors, each with 2-3 birds. Player sees
+  // far-off circling shapes that grow if they wander toward them. Anchors
+  // come from terrainQuery.samplePoints — same primitive any future
+  // landscape-driven mob (deer, javelina) will use.
+  const kettleAnchors = world.terrainQuery.samplePoints({
+    count: 4,
+    worldFraction: 0.85,
+    awayFrom: { x: spawn.x, z: spawn.z, distance: 600 }
+  });
+  for (const anchor of kettleAnchors) {
     const birdCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
     const kRadius = 60 + Math.random() * 40;
     const kAltitude = 60 + Math.random() * 30;
     for (let i = 0; i < birdCount; i++) {
-      mobs.spawnAt('vulture', kx, ky, kz, {
+      mobs.spawnAt('vulture', anchor.x, anchor.y, anchor.z, {
         phase: (i / birdCount) * Math.PI * 2 + Math.random() * 0.5,
         radius: kRadius + i * 6,
         altitude: kAltitude + i * 3,
