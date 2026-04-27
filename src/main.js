@@ -199,12 +199,44 @@ async function main() {
         }
       },
       {
-        id: 'world', label: 'World',
+        // Live tuning for the sub-DEM detail layer. Both the base terrain
+        // mesh and the high-res detail patch read these uniforms (they
+        // share one uniform object), so changes apply everywhere instantly.
+        id: 'detail', label: 'Detail',
         render(el) {
-          const intro = document.createElement('div');
-          intro.style.cssText = 'font-size:11px; letter-spacing:0.18em; color:#b9aa8a; text-transform:uppercase; text-shadow:1px 1px 0 #000;';
-          intro.textContent = '(reserved for time-of-day, fog, etc.)';
-          el.appendChild(intro);
+          const u = world.terrain.uniforms;
+          panelRow(el, {
+            label: 'Ridge amp (m)', min: 0, max: 12, step: 0.1,
+            value: u.uRidgeAmp.value,
+            onInput: v => u.uRidgeAmp.value = v,
+          });
+          panelRow(el, {
+            label: 'Bench amp (m)', min: 0, max: 12, step: 0.1,
+            value: u.uBedAmp.value,
+            onInput: v => u.uBedAmp.value = v,
+          });
+          panelRow(el, {
+            label: 'Bench period (m)', min: 4, max: 60, step: 0.5,
+            value: u.uBedPeriod.value,
+            onInput: v => u.uBedPeriod.value = v,
+          });
+          panelRow(el, {
+            label: 'Bench warp (m)', min: 0, max: 30, step: 0.1,
+            value: u.uBedWarpAmp.value,
+            onInput: v => u.uBedWarpAmp.value = v,
+          });
+          panelButton(el, 'Reset', () => {
+            u.uRidgeAmp.value = 3.0;
+            u.uBedAmp.value = 2.0;
+            u.uBedPeriod.value = 18.0;
+            u.uBedWarpAmp.value = 6.0;
+            el.parentElement.querySelector('.dbg-tab.active').click();
+          });
+          // Note: TerrainQuery still uses the bake-time defaults for CPU
+          // groundY, so cranking these in the panel changes only what the
+          // GPU draws — the bobcat's grounding stays at the original ~5m
+          // peak. That's intentional: visual exploration without making
+          // the cat float/sink.
         }
       }
     ]
@@ -280,6 +312,8 @@ async function main() {
       sunDir: environment.state.sunDir,
       sunColor: environment.state.sunColor
     });
+    // Slide the high-res detail patch to centre on the bobcat each frame.
+    world.updateDetailPatch(bobcat.position.x, bobcat.position.z);
 
     // Park the lantern just above the bobcat with a slight bob.
     lantern.position.set(

@@ -4,6 +4,7 @@ import { loadDEM, heightmapTexture } from '../terrain/DEMLoader.js';
 import { TerrainQuery } from '../terrain/TerrainQuery.js';
 import { generateSplatMap } from '../terrain/SplatMapGenerator.js';
 import { createTerrainMesh } from '../terrain/TerrainMesh.js';
+import { createDetailPatch } from '../terrain/DetailPatch.js';
 import { loadGroundTextures } from '../terrain/GroundTextures.js';
 import { generateDetailNoise } from '../terrain/DetailNoise.js';
 
@@ -90,6 +91,13 @@ export class World {
     });
     this.scene.add(this.terrain.mesh);
 
+    // Detail patch — small high-res mesh that follows the player. Same
+    // height function as the base, so they're co-planar; detail noise
+    // fades at the patch edge so there's no seam. main.js calls
+    // world.updateDetailPatch(x, z) each frame.
+    this.detailPatch = createDetailPatch({ terrain: this.terrain });
+    this.scene.add(this.detailPatch.mesh);
+
     // Single shared landscape-query layer. Every feature that needs to ask
     // questions about the terrain (water, mobs, vegetation, spawn selection)
     // goes through this — no direct dem.data[] reads outside DEMLoader.
@@ -130,6 +138,11 @@ export class World {
   /** World-coordinate ground sampler — what character physics should grab. */
   groundY(x, z) {
     return this.terrainQuery.sampleGroundY(x, z);
+  }
+
+  /** Move the high-res detail patch to centre on (x, z) — call each frame. */
+  updateDetailPatch(x, z) {
+    this.detailPatch.update(x, z);
   }
 
   /**

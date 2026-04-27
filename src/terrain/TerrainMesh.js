@@ -61,13 +61,18 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uBedAmp:           { value: detailNoise ? detailNoise.bedAmp     : 0.0 },
     uBedPeriod:        { value: detailNoise ? detailNoise.bedPeriod  : 18.0 },
     uBedWarpAmp:       { value: detailNoise ? detailNoise.bedWarpAmp : 0.0 },
-    uDetailHas:        { value: detailNoise ? 1.0 : 0.0 }
+    uDetailHas:        { value: detailNoise ? 1.0 : 0.0 },
+    // Detail-patch parameters: only consumed when IS_PATCH is defined
+    // (see DetailPatch.js). Live in the shared uniforms block so the patch
+    // and base material can use a single object.
+    uPatchCenter:      { value: new THREE.Vector2(0, 0) },
+    uPatchHalfSize:    { value: 75.0 },
   };
 
   const material = new THREE.ShaderMaterial({
     uniforms,
-    vertexShader: VERT,
-    fragmentShader: FRAG,
+    vertexShader: TERRAIN_VERT,
+    fragmentShader: TERRAIN_FRAG,
     side: THREE.FrontSide,
     fog: false
   });
@@ -78,7 +83,7 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
   return { mesh, material, uniforms };
 }
 
-const VERT = /* glsl */`
+export const TERRAIN_VERT = /* glsl */`
   precision highp float;
   uniform sampler2D uHeightmap;
   uniform sampler2D uDetailTex;
@@ -86,11 +91,13 @@ const VERT = /* glsl */`
   uniform vec2 uDetailWorldSize;
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
+  uniform vec2 uPatchCenter;
   uniform float uRidgeAmp;
   uniform float uBedAmp;
   uniform float uBedPeriod;
   uniform float uBedWarpAmp;
   uniform float uDetailHas;
+  uniform float uPatchHalfSize;
 
   varying vec3 vWorldPos;
   varying vec2 vUv;
@@ -120,6 +127,22 @@ const VERT = /* glsl */`
     return ridge * uRidgeAmp + pulse * uBedAmp;
   }
 
+  // Detail-fade multiplier — keeps the detail patch (a 256-segment mesh
+  // following the camera) from creating a seam where it meets the coarse
+  // base mesh. At the patch centre the fade is 1 (full detail); over the
+  // outer 15% it ramps to 0 so the patch's surface matches the base mesh's
+  // surface (which has no detail at the same world coords). The base mesh
+  // itself doesn't define IS_PATCH so the fade is constant 1 there.
+  float patchDetailFade(vec2 worldXZ) {
+    #ifdef IS_PATCH
+      vec2 local = worldXZ - uPatchCenter;
+      float maxAbs = max(abs(local.x), abs(local.y));
+      return smoothstep(uPatchHalfSize, uPatchHalfSize * 0.85, maxAbs);
+    #else
+      return 1.0;
+    #endif
+  }
+
   float sampleHEdge(vec2 worldXZ) {
     // Drop both the DEM and the detail through the edge fade so the padding
     // ring stays clean (no stray noise outside the world).
@@ -131,12 +154,16 @@ const VERT = /* glsl */`
     float ef = clamp(outside / 4000.0, 0.0, 1.0);
     ef = ef * ef;
     float baseH = mix(hDem, hDem - 80.0, ef);
-    return baseH + sampleDetail(worldXZ, hDem) * (1.0 - ef);
+    float detailMul = (1.0 - ef) * patchDetailFade(worldXZ);
+    return baseH + sampleDetail(worldXZ, hDem) * detailMul;
   }
 
   void main() {
     vec3 p = position;
-    vec2 worldXZ = p.xz;
+    // World-XZ via modelMatrix so this shader works for both the static
+    // base mesh (mesh.position = 0) and a translated detail patch.
+    vec4 wpInit = modelMatrix * vec4(p, 1.0);
+    vec2 worldXZ = wpInit.xz;
 
     vec2 inside = abs(worldXZ) - uDemSize * 0.5;
     float outside = max(max(inside.x, inside.y), 0.0);
@@ -181,7 +208,7 @@ const VERT = /* glsl */`
   }
 `;
 
-const FRAG = /* glsl */`
+export const TERRAIN_FRAG = /* glsl */`
   precision highp float;
   uniform sampler2D uSplat;
   uniform sampler2D uTexRock;
