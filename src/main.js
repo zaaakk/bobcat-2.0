@@ -1,22 +1,13 @@
 import * as THREE from 'three';
 
-import { loadDEM, heightmapTexture } from './terrain/DEMLoader.js';
-import { TerrainQuery } from './terrain/TerrainQuery.js';
-import { generateSplatMap } from './terrain/SplatMapGenerator.js';
-import { createTerrainMesh } from './terrain/TerrainMesh.js';
-
-import { buildSpriteAtlas } from './vegetation/SpriteAtlas.js';
-import { placeVegetation } from './vegetation/PlacementEngine.js';
-import { createInstancedPlants } from './vegetation/InstancedPlants.js';
-import { SPECIES } from './vegetation/species.js';
-
+import { World } from './world/World.js';
 import { createSky } from './world/Sky.js';
 import { createAudio } from './world/Audio.js';
 import { createNightVision } from './world/NightVision.js';
 import { createDust } from './world/Dust.js';
 import { createMobs, createVultureType } from './world/Mobs.js';
-import { createWaterPools } from './world/Water.js';
 import { loadBobcat } from './player/Bobcat.js';
+import { chooseSpawnPoint } from './player/Spawn.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
 import { createHUD, setLoadingProgress, hideLoading } from './ui/HUD.js';
@@ -45,153 +36,47 @@ async function main() {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 25000);
 
+  let nightVision = null;
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight, false);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     if (nightVision) nightVision.resize(renderer.domElement.width, renderer.domElement.height);
   });
-  let nightVision = null;
 
   // ---------- sky ----------
   const sky = createSky(scene);
 
-  // ---------- DEM ----------
-  setLoadingProgress(0.05, 'Loading terrain…');
-  const dem = await loadDEM('/assets/dem/terrarium.png', '/assets/dem/terrarium.json',
-    t => setLoadingProgress(0.05 + t * 0.30, 'Loading terrain…'));
-  console.log(`DEM ${dem.width}x${dem.height}, ${dem.worldWidth.toFixed(0)}x${dem.worldHeight.toFixed(0)}m, elev ${dem.minZ.toFixed(0)}–${dem.maxZ.toFixed(0)}m`);
-
-  setLoadingProgress(0.40, 'Painting ground…');
-  const heightTex = heightmapTexture(THREE, dem);
-  const splatTex = generateSplatMap(dem, 1280);
-
-  // ---------- ground textures ----------
-  const texLoader = new THREE.TextureLoader();
-  const maxAniso = renderer.capabilities.getMaxAnisotropy?.() || 8;
-  function loadTex(url) {
-    return new Promise((res, rej) => texLoader.load(url, t => {
-      // Mirrored-repeat: each tile is flipped at the seam, so the texture's
-      // own edges meet themselves and there are no bright wrap lines even
-      // when the source PNGs aren't authored to be tileable.
-      t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping;
-      t.colorSpace = THREE.SRGBColorSpace;
-      t.anisotropy = maxAniso;
-      res(t);
-    }, undefined, rej));
-  }
-  // Each `*normals.png` is a 2×2 atlas: TL diffuse / TR normal / BL depth /
-  // BR ORM. The diffuse already exists as a separate file, so here we slice
-  // out just the normal map (top-right cell) per material. Linear color
-  // space is critical — normal maps encode vectors, not perceptual colour.
-  function loadAtlasCell(url, cellX, cellY, { srgb = false } = {}) {
-    return new Promise((res, rej) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        const half = img.width / 2;
-        const c = document.createElement('canvas');
-        c.width = c.height = half;
-        const ctx = c.getContext('2d');
-        ctx.drawImage(img, cellX * half, cellY * half, half, half, 0, 0, half, half);
-        const tex = new THREE.CanvasTexture(c);
-        tex.wrapS = tex.wrapT = THREE.MirroredRepeatWrapping;
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.anisotropy = maxAniso;
-        tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-        tex.generateMipmaps = true;
-        tex.needsUpdate = true;
-        res(tex);
-      };
-      img.onerror = rej;
-      img.src = url;
-    });
-  }
-  const [tRock, tGrass, tGravel, tSand, tNormal,
-         nRock, nGrass, nGravel, nSand] = await Promise.all([
-    loadTex('/assets/ground/rock.png'),
-    loadTex('/assets/ground/grassdry.png'),
-    loadTex('/assets/ground/gravel.png'),
-    loadTex('/assets/ground/sand.png'),
-    loadTex('/assets/ground/normal.png'),
-    // Cell (1, 0) — top-right — is the normal map in each atlas.
-    loadAtlasCell('/assets/ground/rocknormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/grassdrynormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/gravelnormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/sandnormals.png', 1, 0)
-  ]);
-
-  setLoadingProgress(0.55, 'Building terrain mesh…');
-  const terrainSegments = 1280;
-  const terrainEdgePadding = 6000;
-  const terrainPlaneSize = dem.worldWidth + terrainEdgePadding * 2;
-  const terrain = createTerrainMesh({
-    dem, heightTex, splatTex,
-    groundTextures: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
-    groundNormals:  { rock: nRock, grass: nGrass, gravel: nGravel, sand: nSand },
-    normalTex: tNormal,
-    segments: terrainSegments,
-    edgePadding: terrainEdgePadding
-  });
-  scene.add(terrain.mesh);
-
-  // Single shared landscape-query layer. Every feature that needs to ask
-  // questions about the terrain (water, mobs, vegetation, spawn selection)
-  // goes through this — no direct dem.data[] reads outside DEMLoader.
-  const terrainQuery = new TerrainQuery({
-    dem,
-    terrainPlaneSize,
-    terrainSegments
-  });
-  const groundY = (x, z) => terrainQuery.sampleGroundY(x, z);
-
-  // ---------- water pools ----------
-  // Seasonal pools at the lowest spots in the DEM (arroyos, washes). The
-  // mesh is a single drawcall covering all pools; the bobcat can later
-  // drink from nearby pools. Pool positions are exposed via water.pools
-  // for proximity checks.
-  const water = createWaterPools({ terrainQuery, scene, maxPools: 80 });
-
-  // ---------- vegetation ----------
-  setLoadingProgress(0.65, 'Loading flora…');
-  const atlas = await buildSpriteAtlas(SPECIES, 512);
-
-  setLoadingProgress(0.75, 'Placing vegetation…');
-  const instances = placeVegetation({
-    dem,
-    groundY,
-    cellSize: 4.0,
-    globalDensity: 1.0,
-    playRadius: 3500,
-    maxInstances: 1_000_000
-  });
-  console.log(`placed ${instances.count} plant instances`);
-
-  const plants = createInstancedPlants({ atlas, instances, dem });
-  for (const tier of plants.tiers) scene.add(tier.mesh);
+  // ---------- world (terrain, water, vegetation) ----------
+  const world = new World({ scene, renderer, onProgress: setLoadingProgress });
+  await world.init();
 
   // Debug toggles for headless probing.
   const sp = new URLSearchParams(window.location.search);
-  if (sp.has('noplants')) for (const t of plants.tiers) t.mesh.visible = false;
-  if (sp.has('noterrain')) terrain.mesh.visible = false;
-  if (sp.has('nocat')) setTimeout(() => bobcat.object.visible = false, 100);
+  if (sp.has('noplants')) for (const t of world.plants.tiers) t.mesh.visible = false;
+  if (sp.has('noterrain')) world.terrain.mesh.visible = false;
 
   // ---------- player ----------
   setLoadingProgress(0.88, 'Waking bobcat…');
   const bobcat = await loadBobcat({
     onProgress: t => setLoadingProgress(0.88 + t * 0.10, 'Waking bobcat…')
   });
-  const spawn = chooseSpawnPoint(terrainQuery);
+  const spawn = chooseSpawnPoint(world.terrainQuery);
   bobcat.position.set(spawn.x, spawn.y, spawn.z);
   bobcat.yaw = spawn.yaw;
   bobcat.pivot.rotation.y = spawn.yaw;
   scene.add(bobcat.object);
 
-  bobcat.setGroundFn(groundY);
-  const cam = createThirdPersonCamera({ camera, target: bobcat, groundY, domElement: renderer.domElement });
+  bobcat.setGroundFn((x, z) => world.groundY(x, z));
+  const cam = createThirdPersonCamera({
+    camera, target: bobcat,
+    groundY: (x, z) => world.groundY(x, z),
+    domElement: renderer.domElement
+  });
   cam.state.yaw = bobcat.yaw + Math.PI;
   const input = createInput();
+
+  if (sp.has('nocat')) setTimeout(() => bobcat.object.visible = false, 100);
 
   // Dust puffs at the cat's feet — on jump start, jump landing, and on every
   // running footfall (gated by speed so we don't puff during a quiet stalk).
@@ -203,7 +88,6 @@ async function main() {
     });
   };
   bobcat.onJumpLand = pos => {
-    // Bigger, lower puff on landing — feet hit hard, dust kicks outward.
     dust.spawn(pos.x, pos.y, pos.z, {
       count: 9, size: 11, life: 0.85, speedT: 0.9
     });
@@ -214,6 +98,8 @@ async function main() {
   // now, javelina/roadkill/coyotes later). Each type registers a spawn
   // factory; main.js only knows about the registry, not individual mobs.
   const mobs = createMobs(scene);
+  const texLoader = new THREE.TextureLoader();
+  const maxAniso = renderer.capabilities.getMaxAnisotropy?.() || 8;
   const vultureTex = await new Promise((res, rej) =>
     texLoader.load('/assets/mobs/turkeyvulture.png', t => {
       t.colorSpace = THREE.SRGBColorSpace;
@@ -245,18 +131,15 @@ async function main() {
   }
   // Distant background kettles. Each anchored at a fixed spot in the desert,
   // 2-3 birds per kettle. The player sees them as far-off circling shapes
-  // that grow if they wander toward them. Higher altitudes make them
-  // viewable from the player's head level even when terrain rises in the
-  // foreground — and slower angular speed reads as natural soaring.
+  // that grow if they wander toward them.
   const distantKettles = 4;
   for (let k = 0; k < distantKettles; k++) {
-    // Random point inside DEM bounds, well clear of the player's spawn.
     let kx, kz;
     do {
-      kx = (Math.random() - 0.5) * dem.worldWidth * 0.85;
-      kz = (Math.random() - 0.5) * dem.worldHeight * 0.85;
+      kx = (Math.random() - 0.5) * world.dem.worldWidth * 0.85;
+      kz = (Math.random() - 0.5) * world.dem.worldHeight * 0.85;
     } while (Math.hypot(kx - spawn.x, kz - spawn.z) < 600);
-    const ky = groundY(kx, kz);
+    const ky = world.groundY(kx, kz);
     const birdCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
     const kRadius = 60 + Math.random() * 40;
     const kAltitude = 60 + Math.random() * 30;
@@ -266,28 +149,27 @@ async function main() {
         radius: kRadius + i * 6,
         altitude: kAltitude + i * 3,
         angularSpeed: 0.10 + Math.random() * 0.06,
-        // No followTarget: this kettle stays pinned to its anchor.
       });
     }
   }
   if (typeof window !== 'undefined') {
     window.__mobs = mobs;
     window.__cam = cam;
-    window.__water = water;
+    window.__water = world.water;
     window.__bobcat = bobcat;
+    window.__world = world;
   }
 
-  const hud = createHUD({ dem, water });
+  const hud = createHUD({ dem: world.dem, water: world.water });
 
   // Night vision composite — initialised here so resolution matches the
-  // current renderer size (the resize handler closure picks it up later).
+  // current renderer size.
   nightVision = createNightVision(renderer);
   nightVision.resize(renderer.domElement.width, renderer.domElement.height);
 
   // ---------- debug menu ----------
   // Toggle with ` (backtick) or F1. First panel is "Filters" — saturation,
-  // brightness and contrast applied in the night-vision composite, before any
-  // of the lens / vignette effects.
+  // brightness and contrast applied in the night-vision composite.
   createDebugMenu({
     panels: [
       {
@@ -312,7 +194,6 @@ async function main() {
             nightVision.uniforms.uSaturation.value = 0.9;
             nightVision.uniforms.uBrightness.value = 1.1;
             nightVision.uniforms.uContrast.value = 0.9;
-            // Re-render the panel so the slider thumbs jump back.
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
         }
@@ -344,20 +225,25 @@ async function main() {
   scene.add(ambient);
 
   // A small "lantern" point light that hovers above the bobcat. Off during the
-  // day; fades on at dusk and stays on through the night. Cool silvery
-  // moonlight tone (not warm), so the local pool reads as wisp/spirit-light
-  // rather than a campfire.
+  // day; fades on at dusk. Cool moonlight tone reads as wisp/spirit-light.
   const lantern = new THREE.PointLight(0xb8d2ff, 0, 22, 1.3);
   lantern.castShadow = false;
   scene.add(lantern);
 
-  const environment = createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient, lantern });
+  const environment = createDayNightEnvironment({
+    renderer, sky, terrain: world.terrain, plants: world.plants,
+    sun, hemi, ambient, lantern
+  });
   environment.update(0);
 
   const audio = createAudio();
   // Browsers gate AudioContext until a user gesture; start the soundscape on
   // first interaction.
-  const startAudioOnce = () => { audio.start(); window.removeEventListener('pointerdown', startAudioOnce); window.removeEventListener('keydown', startAudioOnce); };
+  const startAudioOnce = () => {
+    audio.start();
+    window.removeEventListener('pointerdown', startAudioOnce);
+    window.removeEventListener('keydown', startAudioOnce);
+  };
   window.addEventListener('pointerdown', startAudioOnce);
   window.addEventListener('keydown', startAudioOnce);
 
@@ -379,32 +265,34 @@ async function main() {
 
     const inputs = input.sample(cam.yaw);
     if (inputs.toggleNightVision) nightVision.toggle();
-    bobcat.update(dt, inputs, dem);
+    bobcat.update(dt, inputs, world.dem);
     cam.update(dt);
     dust.update(dt);
     mobs.update(dt, t);
 
     // Keep the sky sphere centred on the camera so its direction-based shading
-    // doesn't drift when the player walks far from origin (otherwise the sun
-    // disk and horizon haze peel away from the camera's actual view).
+    // doesn't drift when the player walks far from origin.
     sky.mesh.position.copy(camera.position);
 
     environment.update(t);
-    plants.update(t, camera.position);
-    water.update(dt, t, environment.state.sunDir, environment.state.sunColor);
-    // Park the lantern just above the bobcat with a slight bob so it reads as
-    // a hovering will-o'-wisp rather than a baked-in glow.
+    world.update(dt, t, {
+      cameraPosition: camera.position,
+      sunDir: environment.state.sunDir,
+      sunColor: environment.state.sunColor
+    });
+
+    // Park the lantern just above the bobcat with a slight bob.
     lantern.position.set(
       bobcat.position.x,
       bobcat.position.y + 1.6 + Math.sin(t * 1.4) * 0.05,
       bobcat.position.z
     );
-    // The terrain and plant shaders are custom (not Three.js standard
-    // materials), so PointLight doesn't reach them automatically — push the
-    // lantern as plain uniforms so the ground actually catches the glow.
-    terrain.uniforms.uLanternPos.value.copy(lantern.position);
-    terrain.uniforms.uLanternIntensity.value = lantern.intensity * 0.42;
-    for (const tier of plants.tiers) {
+    // Terrain and plant shaders are custom (not Three.js standard materials),
+    // so PointLight doesn't reach them automatically — push the lantern as
+    // plain uniforms so the ground catches the glow.
+    world.terrain.uniforms.uLanternPos.value.copy(lantern.position);
+    world.terrain.uniforms.uLanternIntensity.value = lantern.intensity * 0.42;
+    for (const tier of world.plants.tiers) {
       tier.uniforms.uLanternPos.value.copy(lantern.position);
       tier.uniforms.uLanternIntensity.value = lantern.intensity * 0.45;
     }
@@ -415,15 +303,12 @@ async function main() {
     audio.setDayMix(dayT);
     audio.tick(t);
     if (bobcat.speed > 1.2 && !bobcat.airborne) {
-      // Map speed to a cadence — shorter (= more frequent) at higher speeds.
-      // Walk (~3 m/s) ≈ 0.50 s between paws; full sprint (~15 m/s) ≈ 0.13 s.
-      // Roughly 4× difference so walk and sprint sound clearly distinct.
+      // Map speed to a cadence — shorter at higher speeds. Walk (~3 m/s) ≈
+      // 0.50 s between paws; full sprint (~15 m/s) ≈ 0.13 s.
       const speedT = THREE.MathUtils.clamp(bobcat.speed / bobcat.runSpeed, 0, 1);
       const cadence = 0.50 - 0.37 * speedT;
       if (t - lastFootAt > cadence) {
         audio.footstep(speedT);
-        // Only kick dust above a jog — slow walks shouldn't spray dust on a
-        // dry-floor cat. Scale puff by speed so a sprint trails a real plume.
         if (bobcat.speed > 4.0) {
           dust.spawn(bobcat.position.x, bobcat.position.y, bobcat.position.z, {
             count: 1 + Math.round(speedT * 2),
@@ -447,9 +332,7 @@ async function main() {
 
     // Render the world through the night-vision composite. At day the lens is
     // off (nightAmount = 0) and the composite is a near-passthrough; only the
-    // central circle gets the green-tinted high-gain look at night. Use the
-    // environment's true sun direction — sun.position is moon-flipped at
-    // night so it'd report 'day' the moment the actual sun set.
+    // central circle gets the green-tinted high-gain look at night.
     const trueSunY = environment.state.sunDir.y;
     const nightAmount = 1.0 - THREE.MathUtils.smoothstep(trueSunY, -0.18, 0.06);
     nightVision.render(scene, camera, t, nightAmount);
@@ -473,43 +356,16 @@ async function main() {
   requestAnimationFrame(frame);
 }
 
-function chooseSpawnPoint(terrainQuery, maxRadius = 2800) {
-  // Constrain to a circle so the bobcat always spawns inside the vegetation
-  // zone. (The plant placer uses a finite playRadius around origin — spawning
-  // far outside leaves the bobcat in a bare wasteland with no plants anywhere.)
-  let fallback = { x: 0, y: terrainQuery.sampleGroundY(0, 0), z: 0, yaw: Math.random() * Math.PI * 2 };
-  let bestScore = -Infinity;
-
-  for (let i = 0; i < 28; i++) {
-    const r = Math.sqrt(Math.random()) * maxRadius;
-    const a = Math.random() * Math.PI * 2;
-    const x = Math.cos(a) * r;
-    const z = Math.sin(a) * r;
-    const y = terrainQuery.sampleGroundY(x, z);
-    const slope = terrainQuery.sampleSlope(x, z, 4);
-    const edge = maxRadius - r;
-    const score = edge - slope * 1400;
-    if (score > bestScore) {
-      bestScore = score;
-      fallback = { x, y, z, yaw: Math.random() * Math.PI * 2 };
-    }
-    if (slope < 0.32 && r < maxRadius - 80) {
-      return { x, y, z, yaw: Math.random() * Math.PI * 2 };
-    }
-  }
-  return fallback;
-}
-
 function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, ambient, lantern }) {
   const cycleSeconds = 240;
   const phaseOffset = 0.18;
   const palette = {
-    skyTopDay:    new THREE.Color('#74c2ff'),  // zenith
+    skyTopDay:    new THREE.Color('#74c2ff'),
     skyTopNight:  new THREE.Color('#1c2a44'),
     skyTopDusk:   new THREE.Color('#36547f'),
-    horizonDay:   new THREE.Color('#94dcff'),  // bottom of azimuth
+    horizonDay:   new THREE.Color('#94dcff'),
     horizonNight: new THREE.Color('#2a3b54'),
-    hazeDay:      new THREE.Color('#94dcff'),  // matches the horizon so haze doesn't smear in a separate colour
+    hazeDay:      new THREE.Color('#94dcff'),
     hazeNight:    new THREE.Color('#384c69'),
     hazeDusk:     new THREE.Color('#ef9c67'),
     fogLowDay:    new THREE.Color('#c9d1d8'),
@@ -520,9 +376,9 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
     fogFarNight:  new THREE.Color('#28395a'),
     sunDay:       new THREE.Color('#fff0d1'),
     sunDusk:      new THREE.Color('#ff9a63'),
-    sunNight:     new THREE.Color('#a3b6d8'),  // cool moonlight (used as the moon's glow)
+    sunNight:     new THREE.Color('#a3b6d8'),
     terrainAmbientDay:   new THREE.Color('#6b7486'),
-    terrainAmbientNight: new THREE.Color('#3b4760'),  // moonlit ambient
+    terrainAmbientNight: new THREE.Color('#3b4760'),
     plantAmbientDay:     new THREE.Color('#68758a'),
     plantAmbientNight:   new THREE.Color('#3a4660'),
     hemiSkyDay:   new THREE.Color('#a8c4df'),
@@ -606,8 +462,6 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
       sun.position.copy(state.sunDir).multiplyScalar(1800);
     }
     sun.color.copy(state.sunColor);
-    // Strong direct sun, weak fill — shapes form on the bobcat's PBR materials
-    // the same way the terrain shader is already shading the ground.
     const moonStrength = Math.max(0, -state.sunDir.y);
     sun.intensity = Math.pow(direct, 0.42) * 4.4 + twilightBand * 0.22 + moonStrength * 0.65;
     hemi.color.copy(state.hemiSky);
@@ -617,8 +471,6 @@ function createDayNightEnvironment({ renderer, sky, terrain, plants, sun, hemi, 
     ambient.intensity = THREE.MathUtils.lerp(0.14, 0.16, daylight) + night * 0.04;
     renderer.toneMappingExposure = THREE.MathUtils.lerp(0.82, 1.0, daylight) + twilightBand * 0.04;
 
-    // The lantern: only really on at night. We don't move it here — main.js
-    // ticks it onto the bobcat's position each frame.
     if (lantern) {
       lantern.intensity = night * 6.5 + twilightBand * 1.2;
     }
