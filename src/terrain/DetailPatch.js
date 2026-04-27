@@ -73,9 +73,13 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
   });
 
   const mesh = new THREE.Mesh(geometry, material);
-  // Frustum-cull is fine — the patch is a small bounded mesh, Three handles
-  // it. (The base mesh disables culling because it spans the whole world.)
-  mesh.frustumCulled = true;
+  // Disable frustum culling: the geometry's bounding sphere is computed
+  // from its local positions (a flat plane at y=0), but the vertex shader
+  // displaces vertices to terrain elevation (~500m). Three.js doesn't know
+  // about that displacement, so it culls the patch as "below the camera"
+  // even though the rendered geometry is right under the cat. Same reason
+  // the base terrain mesh disables culling.
+  mesh.frustumCulled = false;
   mesh.receiveShadow = false;
   // Renders after the base mesh, so the polygon offset's depth-bias decides
   // who wins on overlapping pixels.
