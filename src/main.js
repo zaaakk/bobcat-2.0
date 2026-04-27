@@ -244,6 +244,17 @@ async function main() {
             u.uFineTileSize.value = 4.0;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
+          // Wireframe toggle — toggles on the base terrain AND the detail
+          // patch so you can see both grid resolutions at once. Shows the
+          // 26m base spacing vs. the 0.29m patch spacing where they overlap.
+          const baseMat = world.terrain.material;
+          const patchMat = world.detailPatch.material;
+          const wireBtn = panelButton(el, `Wireframe: ${baseMat.wireframe ? 'ON' : 'OFF'}`, () => {
+            const next = !baseMat.wireframe;
+            baseMat.wireframe = next;
+            patchMat.wireframe = next;
+            wireBtn.textContent = `Wireframe: ${next ? 'ON' : 'OFF'}`;
+          });
           // Note: TerrainQuery still uses the bake-time defaults for CPU
           // groundY, so cranking these in the panel changes only what the
           // GPU draws — the bobcat's grounding stays at the original ~5m
