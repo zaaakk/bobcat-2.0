@@ -95,8 +95,14 @@ export class World {
     // height function as the base, so they're co-planar; detail noise
     // fades at the patch edge so there's no seam. main.js calls
     // world.updateDetailPatch(x, z) each frame.
-    this.detailPatch = createDetailPatch({ terrain: this.terrain });
+    const patchSize = 150, patchResolution = 512;
+    this.detailPatch = createDetailPatch({
+      terrain: this.terrain,
+      size: patchSize,
+      resolution: patchResolution
+    });
     this.scene.add(this.detailPatch.mesh);
+    const patchSpacing = patchSize / patchResolution;
 
     // Single shared landscape-query layer. Every feature that needs to ask
     // questions about the terrain (water, mobs, vegetation, spawn selection)
@@ -106,6 +112,7 @@ export class World {
       terrainPlaneSize,
       terrainSegments: this.terrainSegments,
       detailNoise: this.detailNoise,
+      patchSpacing,
     });
 
     // Seasonal pools at low spots in the DEM. The bobcat can later drink

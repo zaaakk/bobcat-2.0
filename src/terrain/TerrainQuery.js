@@ -25,13 +25,18 @@
  * Hold onto its (i, j, x, z, height) values, not the cell itself.
  */
 export class TerrainQuery {
-  constructor({ dem, terrainPlaneSize, terrainSegments, detailNoise = null }) {
+  constructor({ dem, terrainPlaneSize, terrainSegments, detailNoise = null, patchSpacing = null }) {
     this.dem = dem;
     this.planeSize = terrainPlaneSize;
     this.segments = terrainSegments;
     // Optional sub-DEM detail. When set, sampleHeight returns DEM + detail
     // so groundY queries agree with the GPU's vertex displacement.
     this.detailNoise = detailNoise;
+    // When the high-res detail patch is in play, sampleGroundY needs to
+    // triangulate at the patch's vertex grid (~0.3m), not the base mesh's
+    // ~26m grid — otherwise the cat samples a smoothed surface and walks
+    // through the visible bumps. World.js sets this from the patch.
+    this.patchSpacing = patchSpacing;
   }
 
   get worldWidth()    { return this.dem.worldWidth; }
@@ -107,8 +112,10 @@ export class TerrainQuery {
     const warpedH = baseDem + ridge * dn.bedWarpAmp;
     const bedTau = 6.283185307179586 / dn.bedPeriod;
     const pulse = Math.max(0, Math.sin(warpedH * bedTau) - 0.5) * 2;
-    // Fine layer (tile-wrapped FBM in [-1, 1]).
-    const fine = dn.fine ? this._sampleFineTile(x, z) : 0;
+    // Fine layer (tile-wrapped FBM in [-1, 1]), domain-warped by the
+    // broad ridge value so the 16m tile pattern doesn't read as a regular
+    // grid. Mirrors the GPU shader.
+    const fine = dn.fine ? this._sampleFineTile(x + ridge * 4.0, z + ridge * 3.0) : 0;
     const fineAmp = dn.fine ? dn.fine.amp : 0;
     return ridge * dn.ridgeAmp + pulse * dn.bedAmp + fine * fineAmp;
   }
@@ -166,18 +173,25 @@ export class TerrainQuery {
    * PlaneGeometry triangulates with the V01↔V10 diagonal — using the wrong
    * split causes visible floating/sinking on slopes. Use this for character
    * grounding and any visual-alignment query.
+   *
+   * When a detail patch is configured (patchSpacing set), we triangulate at
+   * the patch's vertex grid (~0.29m), since that's the highest-resolution
+   * mesh covering the cat's position — its surface has 2-5m bumps that the
+   * coarse base-mesh triangulation (~26m) averages away. Without this fix
+   * the cat visibly clips through bedding shelves and ridges.
    */
   sampleGroundY(x, z) {
-    const halfPlane = this.planeSize * 0.5;
-    const dx = this.planeSize / this.segments;
-    const gx = (x + halfPlane) / dx;
-    const gy = (z + halfPlane) / dx;
-    const ix0 = Math.floor(gx), iy0 = Math.floor(gy);
-    const fx = gx - ix0, fy = gy - iy0;
-    const x0w = ix0 * dx - halfPlane;
-    const x1w = (ix0 + 1) * dx - halfPlane;
-    const y0w = iy0 * dx - halfPlane;
-    const y1w = (iy0 + 1) * dx - halfPlane;
+    const dx = this.patchSpacing != null
+      ? this.patchSpacing
+      : this.planeSize / this.segments;
+    // Anchor the cell at multiples of dx (matches both the base mesh's
+    // PlaneGeometry vertex grid AND the patch's grid-snapped vertices).
+    const x0w = Math.floor(x / dx) * dx;
+    const y0w = Math.floor(z / dx) * dx;
+    const x1w = x0w + dx;
+    const y1w = y0w + dx;
+    const fx = (x - x0w) / dx;
+    const fy = (z - y0w) / dx;
     const v00 = this.sampleHeight(x0w, y0w);
     const v10 = this.sampleHeight(x1w, y0w);
     const v01 = this.sampleHeight(x0w, y1w);

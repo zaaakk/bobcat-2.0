@@ -134,9 +134,13 @@ export const TERRAIN_VERT = /* glsl */`
     float warpedH = hDem + ridge * uBedWarpAmp;
     float bedTau  = 6.283185307179586 / uBedPeriod;
     float pulse   = max(0.0, sin(warpedH * bedTau) - 0.5) * 2.0;
-    // Fine layer: tile-wrapped FBM in [-1, 1] giving sub-metre bumps that
-    // the broad texture can't resolve. RepeatWrapping handles the wrap.
-    float fine = texture2D(uFineTex, worldXZ / uFineTileSize).r;
+    // Fine layer: tile-wrapped FBM in [-1, 1]. We domain-warp its UVs by
+    // the broad-ridge value so the tile pattern doesn't read as a regular
+    // 16m grid — the broad ridge is world-aligned and doesn't repeat, so
+    // the fine pattern wanders with the macro features. Costs nothing
+    // extra (we already sampled the ridge above).
+    vec2 warpedXZ = worldXZ + vec2(ridge * 4.0, ridge * 3.0);
+    float fine = texture2D(uFineTex, warpedXZ / uFineTileSize).r;
     return ridge * uRidgeAmp + pulse * uBedAmp + fine * uFineAmp;
   }
 
