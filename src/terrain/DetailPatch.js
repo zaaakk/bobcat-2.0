@@ -65,11 +65,15 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
     defines: { IS_PATCH: 1 },
     side: THREE.FrontSide,
     fog: false,
-    // Tiny depth bias so we win over the base mesh where they're co-planar.
-    // No actual height shift — we only nudge the depth-buffer comparison.
+    // Strong depth bias so the patch always wins over the base mesh in the
+    // overlap zone. The patch's outer 15% is detail-faded toward base, but
+    // small triangulation differences still mean base can be slightly
+    // higher than patch in spots. Pushing the patch's depth toward camera
+    // by a meaningful margin guarantees it occludes base wherever they
+    // both draw.
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -10,
+    polygonOffsetUnits: -10,
   });
 
   const mesh = new THREE.Mesh(geometry, material);

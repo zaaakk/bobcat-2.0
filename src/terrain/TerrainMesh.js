@@ -310,16 +310,16 @@ export const TERRAIN_FRAG = /* glsl */`
     // patch material has IS_PATCH defined so it draws normally; the base
     // mesh discards inside the patch's coverage and lets the patch fill it.
     #ifndef IS_PATCH
-      // Discard slightly INSIDE the patch's geometric edge so there's a
-      // 1m overlap zone where both meshes draw. Without the overlap, the
-      // patch's last vertex at exactly halfSize and the base mesh's first
-      // un-discarded fragment just past halfSize land on different
-      // triangulations of the same DEM — small differences leave a
-      // visible seam line. Overlapping lets both meshes render in the
-      // 1m strip; depth-test picks the closer one and any difference
-      // hides under the patch's faded detail.
+      // Discard well inside the patch's geometric edge so there's a 5m
+      // overlap zone where both meshes draw. Without enough overlap, the
+      // patch's faded detail at its outer edge doesn't match the base
+      // mesh's full-detail surface there, leaving a visible seam line.
+      // 5m comfortably covers the patch's detail-fade region (the outer
+      // 15% = 11m on a 75m halfSize), so the strip where both meshes
+      // draw is also where the patch's detail is mostly already faded
+      // and the surfaces are close to matching.
       vec2 patchLocal = worldXZ - uPatchCenter;
-      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize - 1.0) {
+      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize - 5.0) {
         discard;
       }
     #endif

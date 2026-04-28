@@ -83,21 +83,23 @@ export function generateDetailNoise({
   // so even a half-strength mask still leaves visible stairsteps. Gating the
   // bench layer with a *stricter* mask than the ridge/fine layers keeps
   // stairsteps confined to clearly-ridged areas; transition zones stay
-  // smooth.
-  benchMaskLo    = 0.55,
-  benchMaskHi    = 0.78,
+  // smooth. Tight defaults: bench only on the most ridged ~10% of the
+  // world, which reads as occasional caprock outcrops rather than universal
+  // stairsteps.
+  benchMaskLo    = 0.65,
+  benchMaskHi    = 0.85,
   // Water-pool exclusion list. After the broad ridge is baked, we scale the
   // ridge value to 0 within each pool's radius (and blend smoothly out over
   // poolFadeRadius beyond) so caprock bumps don't stick up through the
   // water surface. Pools shape: { x, z, r } in world coords.
   pools          = [],
-  poolFadeRadius = 5.0,
+  poolFadeRadius = 8.0,
   // Carve depth: actual signed displacement that lowers terrain inside each
   // pool's radius (and over the fade ring). Without this, bowls are at most
   // MIN_DEPTH (0.4m) deep — barely visible. The carve runs OUTSIDE the
   // detail mask, so it always applies regardless of ridge value, and the
   // bobcat's CPU groundY mirrors the GPU shader so it tracks into the bowl.
-  carveAmp       = 0.85,
+  carveAmp       = 3.0,
 } = {}) {
   const noise = createNoise2D(() => seed);
   const w = resolution, h = resolution;

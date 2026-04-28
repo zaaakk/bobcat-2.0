@@ -90,7 +90,12 @@ export function createWaterRenderer({ pools, scene }) {
   const material = new THREE.ShaderMaterial({
     uniforms,
     transparent: true,
-    depthWrite: false,
+    // depthWrite: true so the water occludes things behind it correctly
+    // (with depthWrite off and a merged 30-pool geometry, the transparency
+    // sort fires once for the whole batch and far things behind cat could
+    // wrongly draw over cat in some camera angles). We accept that in
+    // exchange for the cat NOT being weirdly overlaid by faraway water.
+    depthWrite: true,
     side: THREE.DoubleSide,
     vertexShader: /* glsl */`
       attribute float aDepth;
@@ -164,9 +169,11 @@ export function createWaterRenderer({ pools, scene }) {
         col += uSunColor * spec * 1.4;
 
         // Alpha — clearer at top-down (low Fresnel) so the bottom shows through;
-        // more opaque at glancing angles where reflection takes over.
-        float alpha = mix(0.42, 0.85, vDepth);
-        alpha = mix(alpha, 0.92, fresnel * 0.55);
+        // more opaque at glancing angles where reflection takes over. Capped
+        // at ~0.78 so the water never goes fully opaque (always reads as
+        // water, not paint).
+        float alpha = mix(0.40, 0.72, vDepth);
+        alpha = mix(alpha, 0.78, fresnel * 0.55);
 
         gl_FragColor = vec4(col, alpha);
       }

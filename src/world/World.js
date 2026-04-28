@@ -88,8 +88,7 @@ export class World {
       worldWidth:  this.dem.worldWidth,
       worldHeight: this.dem.worldHeight,
       resolution:  2048,
-      pools,                  // suppress broad ridge inside each pool
-      poolFadeRadius: 6.0,
+      pools,                  // suppress broad ridge + carve bowl
     });
     // (Step 5) Splice the freshly-baked noise into the existing query.
     this.terrainQuery.detailNoise = this.detailNoise;
