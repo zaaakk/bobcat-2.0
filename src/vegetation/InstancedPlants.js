@@ -13,17 +13,12 @@ import { SPECIES } from './species.js';
  */
 export function createInstancedPlants({ atlas, instances, dem }) {
   const tiers = [];
-
-  const sharedAttribs = {
-    aOffset: new THREE.InstancedBufferAttribute(new Float32Array(instances.positions), 3),
-    aScale: new THREE.InstancedBufferAttribute(new Float32Array(instances.scales), 1),
-    aRotation: new THREE.InstancedBufferAttribute(new Float32Array(instances.rotations), 1),
-    aSpecies: new THREE.InstancedBufferAttribute(new Float32Array(instances.species), 1)
-  };
+  const chunkSize = 512;
+  const chunks = buildPlantChunks(instances, chunkSize);
 
   // Build atlas-rect lookup as a Vec4 array uniform: [uOffset, vOffset, uScale, vScale].
   // Pad to MAX_SPECIES so the shader can use a fixed-size array uniform.
-  const MAX_SPECIES = 8;
+  const MAX_SPECIES = 12;
   const rects = new Float32Array(MAX_SPECIES * 4);
   SPECIES.forEach((s, idx) => {
     const r = atlas.uvRects[s.atlasIndex];
@@ -61,16 +56,38 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     uTime: { value: 0 }
   };
 
+  const tierConfigs = [
+    {
+      geometry: () => makeRosetteGeometry(3),
+      tierMin: 0,
+      tierMax: 140,
+      fadeIn: 0,
+      fadeOut: 25,
+    },
+    {
+      geometry: makeCrossGeometry,
+      tierMin: 110,
+      tierMax: 420,
+      fadeIn: 25,
+      fadeOut: 60,
+    },
+    {
+      geometry: makeQuadGeometry,
+      tierMin: 380,
+      tierMax: 2800,
+      fadeIn: 60,
+      fadeOut: 200,
+    }
+  ];
+
   // ---------------- NEAR tier: 3-quad rosette (Y-billboard family) ----------------
-  {
-    const geo = makeRosetteGeometry(3);
-    attachInstancedAttribs(geo, sharedAttribs);
+  for (const cfg of tierConfigs) {
     const uniforms = THREE.UniformsUtils.clone(sharedUniforms);
     uniforms.uAtlas = sharedUniforms.uAtlas; // share texture object
-    uniforms.uTierMin.value = 0;
-    uniforms.uTierMax.value = 140;
-    uniforms.uFadeIn.value = 0;
-    uniforms.uFadeOut.value = 25;
+    uniforms.uTierMin.value = cfg.tierMin;
+    uniforms.uTierMax.value = cfg.tierMax;
+    uniforms.uFadeIn.value = cfg.fadeIn;
+    uniforms.uFadeOut.value = cfg.fadeOut;
     const mat = new THREE.ShaderMaterial({
       uniforms,
       vertexShader: VERT,
@@ -79,73 +96,139 @@ export function createInstancedPlants({ atlas, instances, dem }) {
       alphaTest: 0.5,
       side: THREE.DoubleSide
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.frustumCulled = false;
-    mesh.renderOrder = 1;
-    tiers.push({ mesh, material: mat, uniforms });
+
+    const group = new THREE.Group();
+    group.frustumCulled = false;
+    const meshes = [];
+    for (const chunk of chunks) {
+      const geo = cfg.geometry();
+      attachInstancedAttribs(geo, chunk.attribs);
+      geo.instanceCount = chunk.count;
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 1;
+      mesh.userData.plantChunk = chunk;
+      group.add(mesh);
+      meshes.push(mesh);
+    }
+
+    tiers.push({ mesh: group, material: mat, uniforms, meshes, config: cfg });
   }
 
-  // ---------------- MID tier: crossed quads (two world-oriented planes at 90°)
-  {
-    const geo = makeCrossGeometry();
-    attachInstancedAttribs(geo, sharedAttribs);
-    const uniforms = THREE.UniformsUtils.clone(sharedUniforms);
-    uniforms.uAtlas = sharedUniforms.uAtlas;
-    uniforms.uTierMin.value = 110;
-    uniforms.uTierMax.value = 420;
-    uniforms.uFadeIn.value = 25;
-    uniforms.uFadeOut.value = 60;
-    const mat = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-      transparent: false,
-      alphaTest: 0.5,
-      side: THREE.DoubleSide
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.frustumCulled = false;
-    mesh.renderOrder = 1;
-    tiers.push({ mesh, material: mat, uniforms });
-  }
+  const projScreen = new THREE.Matrix4();
+  const frustum = new THREE.Frustum();
+  const sphere = new THREE.Sphere();
 
-  // ---------------- FAR tier: single world-oriented quad
-  {
-    const geo = makeQuadGeometry();
-    attachInstancedAttribs(geo, sharedAttribs);
-    const uniforms = THREE.UniformsUtils.clone(sharedUniforms);
-    uniforms.uAtlas = sharedUniforms.uAtlas;
-    uniforms.uTierMin.value = 380;
-    uniforms.uTierMax.value = 2800;
-    uniforms.uFadeIn.value = 60;
-    uniforms.uFadeOut.value = 200;
-    const mat = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: VERT,
-      fragmentShader: FRAG,
-      transparent: false,
-      alphaTest: 0.5,
-      side: THREE.DoubleSide
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.frustumCulled = false;
-    mesh.renderOrder = 1;
-    tiers.push({ mesh, material: mat, uniforms });
-  }
-
-  // Set instance count on each tier (driven by shader-side discard).
-  const N = instances.count;
-  for (const t of tiers) {
-    t.mesh.geometry.instanceCount = N;
-  }
-
-  function update(time, cameraPos) {
+  function update(time, cameraPos, camera) {
+    if (camera) {
+      projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(projScreen);
+    }
     for (const t of tiers) {
       t.uniforms.uTime.value = time;
+      const minD = Math.max(0, t.config.tierMin - t.config.fadeIn);
+      const maxD = t.config.tierMax + t.config.fadeOut;
+      let visibleCount = 0;
+      for (const mesh of t.meshes) {
+        const chunk = mesh.userData.plantChunk;
+        const dx = cameraPos.x - chunk.center.x;
+        const dz = cameraPos.z - chunk.center.z;
+        const distXZ = Math.hypot(dx, dz);
+        let visible = distXZ + chunk.radiusXZ >= minD && distXZ - chunk.radiusXZ <= maxD;
+        if (visible && camera) {
+          sphere.center.copy(chunk.center);
+          sphere.radius = chunk.radius;
+          visible = frustum.intersectsSphere(sphere);
+        }
+        mesh.visible = visible;
+        if (visible) visibleCount++;
+      }
+      t.visibleChunks = visibleCount;
     }
   }
 
-  return { tiers, update, count: N };
+  return { tiers, update, count: instances.count, chunkCount: chunks.length };
+}
+
+function buildPlantChunks(instances, chunkSize) {
+  const meta = new Map();
+  const N = instances.count;
+  for (let i = 0; i < N; i++) {
+    const x = instances.positions[i * 3 + 0];
+    const y = instances.positions[i * 3 + 1];
+    const z = instances.positions[i * 3 + 2];
+    const scale = instances.scales[i];
+    const cx = Math.floor(x / chunkSize);
+    const cz = Math.floor(z / chunkSize);
+    const key = `${cx},${cz}`;
+    let chunk = meta.get(key);
+    if (!chunk) {
+      chunk = {
+        key, cx, cz, count: 0,
+        minX: Infinity, maxX: -Infinity,
+        minY: Infinity, maxY: -Infinity,
+        minZ: Infinity, maxZ: -Infinity,
+      };
+      meta.set(key, chunk);
+    }
+    chunk.count++;
+    chunk.minX = Math.min(chunk.minX, x);
+    chunk.maxX = Math.max(chunk.maxX, x);
+    chunk.minY = Math.min(chunk.minY, y);
+    chunk.maxY = Math.max(chunk.maxY, y + scale);
+    chunk.minZ = Math.min(chunk.minZ, z);
+    chunk.maxZ = Math.max(chunk.maxZ, z);
+  }
+
+  const chunks = [...meta.values()];
+  for (const chunk of chunks) {
+    chunk.positions = new Float32Array(chunk.count * 3);
+    chunk.scales = new Float32Array(chunk.count);
+    chunk.rotations = new Float32Array(chunk.count);
+    chunk.species = new Float32Array(chunk.count);
+    chunk.write = 0;
+  }
+
+  for (let i = 0; i < N; i++) {
+    const x = instances.positions[i * 3 + 0];
+    const z = instances.positions[i * 3 + 2];
+    const cx = Math.floor(x / chunkSize);
+    const cz = Math.floor(z / chunkSize);
+    const chunk = meta.get(`${cx},${cz}`);
+    const j = chunk.write++;
+    chunk.positions[j * 3 + 0] = x;
+    chunk.positions[j * 3 + 1] = instances.positions[i * 3 + 1];
+    chunk.positions[j * 3 + 2] = z;
+    chunk.scales[j] = instances.scales[i];
+    chunk.rotations[j] = instances.rotations[i];
+    chunk.species[j] = instances.species[i];
+  }
+
+  for (const chunk of chunks) {
+    chunk.center = new THREE.Vector3(
+      (chunk.minX + chunk.maxX) * 0.5,
+      (chunk.minY + chunk.maxY) * 0.5,
+      (chunk.minZ + chunk.maxZ) * 0.5
+    );
+    const hx = (chunk.maxX - chunk.minX) * 0.5;
+    const hy = (chunk.maxY - chunk.minY) * 0.5;
+    const hz = (chunk.maxZ - chunk.minZ) * 0.5;
+    chunk.radiusXZ = Math.hypot(hx, hz);
+    chunk.radius = Math.hypot(chunk.radiusXZ, hy);
+    chunk.attribs = {
+      aOffset: new THREE.InstancedBufferAttribute(chunk.positions, 3),
+      aScale: new THREE.InstancedBufferAttribute(chunk.scales, 1),
+      aRotation: new THREE.InstancedBufferAttribute(chunk.rotations, 1),
+      aSpecies: new THREE.InstancedBufferAttribute(chunk.species, 1)
+    };
+    delete chunk.positions;
+    delete chunk.scales;
+    delete chunk.rotations;
+    delete chunk.species;
+    delete chunk.write;
+  }
+
+  return chunks;
 }
 
 function attachInstancedAttribs(geo, attribs) {
@@ -225,8 +308,8 @@ const VERT = /* glsl */`
   attribute float aScale;
   attribute float aRotation;
   attribute float aSpecies;
-  uniform vec4 uRects[8];
-  uniform float uAspects[8];
+  uniform vec4 uRects[12];
+  uniform float uAspects[12];
   uniform float uTierMin;
   uniform float uTierMax;
   uniform float uFadeIn;
@@ -314,23 +397,25 @@ const FRAG = /* glsl */`
 
     lit *= uExposure;
 
-    // Aerial perspective — same model as the terrain.
+    // Aerial perspective — same monotonic far-colour takeover as terrain.
     vec3 viewRay = normalize(vWorldPos - cameraPosition);
     float dist = length(cameraPosition - vWorldPos);
     float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
     float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
     float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
     float fog = 1.0 - exp(-dist * uFogDensity * densityBoost);
-    float fogStage = smoothstep(0.28, 0.82, fog);
-    vec3 fogCol = mix(
-      mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
-      uFogColorFar,
-      fogStage
-    );
+    fog = smoothstep(0.0, 1.0, clamp(fog, 0.0, 1.0));
+    vec3 nearFog = mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.45, fog));
+    vec3 fogCol = mix(nearFog, uFogColorFar, smoothstep(0.35, 0.85, fog));
     float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
-    fogCol += uSunColor * sunScatter * horizon * fog * 0.22;
+    fogCol += uSunColor * sunScatter * horizon * fog * (1.0 - smoothstep(0.60, 0.95, fog)) * 0.12;
+    float horizonTakeover = smoothstep(0.85, 1.0, fog);
+    fogCol = mix(fogCol, uFogColorFar, horizonTakeover);
+    fog = mix(fog, 1.0, horizonTakeover);
     lit = mix(lit, fogCol, fog);
 
     gl_FragColor = vec4(lit, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;

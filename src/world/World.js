@@ -9,12 +9,13 @@ import { loadGroundTextures } from '../terrain/GroundTextures.js';
 import { generateDetailNoise } from '../terrain/DetailNoise.js';
 
 import { buildSpriteAtlas } from '../vegetation/SpriteAtlas.js';
-import { placeVegetation } from '../vegetation/PlacementEngine.js';
+import { mergeVegetation, placeVegetation } from '../vegetation/PlacementEngine.js';
 import { createInstancedPlants } from '../vegetation/InstancedPlants.js';
 import { SPECIES } from '../vegetation/species.js';
 
 import { findWaterPools } from './WaterAnalysis.js';
 import { createWaterPools } from './Water.js';
+import { createGroundShadows } from './GroundShadows.js';
 
 /**
  * The static world: terrain + landscape-derived features.
@@ -47,10 +48,16 @@ export class World {
     this.detailNoise = null;
     this.terrain = null;
     this.detailPatch = null;
+    this.detailPatches = [];
     this.water = null;
     this.plants = null;
+    this.shadows = null;
     this.terrainSegments = 1280;
-    this.terrainEdgePadding = 6000;
+    // Padding ring around the DEM. Camera far plane is 25km, so any cat
+    // position needs ~25km of terrain in every direction to never see the
+    // plane's edge clipped against fog. With a ~21km DEM, half-extent is
+    // ~10.5km, so padding = 15km guarantees ≥25km even from the DEM corner.
+    this.terrainEdgePadding = 15000;
   }
 
   async init() {
@@ -106,13 +113,29 @@ export class World {
     });
     this.scene.add(this.terrain.mesh);
 
-    const patchSize = 150, patchResolution = 512;
+    const farPatchSize = 900, farPatchResolution = 768;
+    this.terrain.uniforms.uPatchHalfSize.value = farPatchSize * 0.5;
+    const farPatch = createDetailPatch({
+      terrain: this.terrain,
+      size: farPatchSize,
+      resolution: farPatchResolution,
+      renderOrder: 1,
+      polygonOffsetFactor: -6,
+      polygonOffsetUnits: -6,
+    });
+    this.scene.add(farPatch.mesh);
+
+    const patchSize = 300, patchResolution = 512;
     this.detailPatch = createDetailPatch({
       terrain: this.terrain,
       size: patchSize,
       resolution: patchResolution,
+      renderOrder: 2,
+      polygonOffsetFactor: -12,
+      polygonOffsetUnits: -12,
     });
     this.scene.add(this.detailPatch.mesh);
+    this.detailPatches = [farPatch, this.detailPatch];
     this.terrainQuery.patchSpacing = patchSize / patchResolution;
 
     // (Step 7) Water — pools list is pre-computed so we just build the mesh.
@@ -127,18 +150,35 @@ export class World {
     const atlas = await buildSpriteAtlas(SPECIES, 512);
 
     this._onProgress(0.75, 'Placing vegetation…');
-    const instances = placeVegetation({
+    const innerPlants = placeVegetation({
       dem: this.dem,
       groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
       cellSize: 4.0,
-      globalDensity: 1.0,
+      globalDensity: 2.0,
       playRadius: 3500,
       maxInstances: 1_000_000,
     });
-    console.log(`placed ${instances.count} plant instances`);
+    const outerPlants = placeVegetation({
+      dem: this.dem,
+      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
+      cellSize: 12.0,
+      globalDensity: 1.35,
+      innerRadius: 3300,
+      playRadius: Math.hypot(this.dem.worldWidth, this.dem.worldHeight) * 0.5,
+      maxInstances: 450_000,
+    });
+    const instances = mergeVegetation(innerPlants, outerPlants);
+    console.log(`placed ${instances.count} plant instances (${innerPlants.count} inner, ${outerPlants.count} outer)`);
 
     this.plants = createInstancedPlants({ atlas, instances, dem: this.dem });
     for (const tier of this.plants.tiers) this.scene.add(tier.mesh);
+
+    this.shadows = createGroundShadows({
+      scene: this.scene,
+      instances,
+      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z)
+    });
+    console.log(`plant shadows: ${this.shadows.count} instances`);
   }
 
   /** World-coordinate ground sampler — what character physics should grab. */
@@ -148,19 +188,21 @@ export class World {
 
   /** Move the high-res detail patch to centre on (x, z) — call each frame. */
   updateDetailPatch(x, z) {
-    this.detailPatch.update(x, z);
+    for (const patch of this.detailPatches) patch.update(x, z);
   }
 
   /**
    * Per-frame tick. ctx carries cross-cutting per-frame inputs:
    *   ctx.cameraPosition — Three.Vector3 of the camera (for plant LOD).
+   *   ctx.camera         — Three.Camera (for plant chunk frustum culling).
    *   ctx.sunDir         — Three.Vector3 (normalized) of sun direction.
    *   ctx.sunColor       — Three.Color of current sunlight.
    *   ctx.skyTop         — Three.Color of zenith (water reflection).
    *   ctx.haze           — Three.Color of horizon haze (water reflection).
    */
   update(dt, t, ctx) {
-    this.plants.update(t, ctx.cameraPosition);
+    this.plants.update(t, ctx.cameraPosition, ctx.camera);
+    if (this.shadows) this.shadows.updatePlants(ctx.cameraPosition, ctx.camera, ctx.environment);
     this.water.update(dt, t, ctx);
   }
 }

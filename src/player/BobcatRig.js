@@ -32,7 +32,7 @@ export async function loadBobcatRig({ url = '/assets/bobcat.glb', onProgress } =
       res(t);
     }, undefined, () => res(null)));
   const [furBase, furNormal, furRough, eyeBase, whiskersBase] = await Promise.all([
-    loadOpt('/assets/bobcat_textures/nabobcat_ani_male_fur.pbasecolourandmasktexture.png'),
+    loadOpt(`/assets/bobcat_textures/bobcat-newfurdiffuse.jpg?t=${Date.now()}`),
     loadOpt('/assets/bobcat_textures/nabobcat_ani_male_fur.pnormaltexture.png', false),
     loadOpt('/assets/bobcat_textures/nabobcat_ani_male_fur.proughnesspackedtexture.png', false),
     loadOpt('/assets/bobcat_textures/nabobcat_ani_male_eye.pbasecolourandmasktexture.png'),
@@ -83,39 +83,60 @@ function buildRig(gltf, pzTextures) {
     }
   });
 
-  // Pick the right PZ texture per submesh by mesh name. PZ packs diffuse +
-  // alpha mask in pbasecolourandmasktexture, normal in pnormaltexture,
-  // roughness in proughnesspackedtexture.
-  const pickTexturesForMesh = meshName => {
-    const lc = (meshName || '').toLowerCase();
-    if (lc.includes('fur')) return { map: pzTextures.furBase, normalMap: pzTextures.furNormal, roughMap: pzTextures.furRough };
+  // Pick the right PZ texture per material. The shipped GLB's *meshes* are
+  // named `nabobcat_mod_male_model0..23` (LOD/marking variants) so a mesh-name
+  // heuristic never matched — but the *materials* are correctly named
+  // (`nabobcat_ani_male_fur`, `_skin`, `_eye`, `_whiskers`). Key off those.
+  // Fur material gets the new JPG diffuse; skin shares it (single body covering).
+  const pickTexturesForMaterial = matName => {
+    const lc = (matName || '').toLowerCase();
     if (lc.includes('eye')) return { map: pzTextures.eyeBase };
     if (lc.includes('whisker')) return { map: pzTextures.whiskersBase };
+    if (lc.includes('fur') || lc.includes('skin')) {
+      return { map: pzTextures.furBase, normalMap: pzTextures.furNormal, roughMap: pzTextures.furRough };
+    }
     return {};
   };
+  const debugSeen = new Set();
   root.traverse(o => {
     if (!o.isMesh && !o.isSkinnedMesh) return;
     if (!o.visible) return;
     const mats = Array.isArray(o.material) ? o.material : [o.material];
-    const picks = pickTexturesForMesh(o.name);
     for (const m of mats) {
       if (!m) continue;
-      if (picks.map && !m.map) m.map = picks.map;
-      if (picks.normalMap && !m.normalMap) {
+      const picks = pickTexturesForMaterial(m.name);
+      // Override unconditionally — the GLB ships with a marking-noise PNG
+      // bound to map slots on some materials, so honoring an existing m.map
+      // would hide the diffuse we want to apply.
+      if (picks.map) m.map = picks.map;
+      if (picks.normalMap) {
         m.normalMap = picks.normalMap;
         if (m.normalScale) m.normalScale.set(1.0, 1.0);
       }
-      if (picks.roughMap && !m.roughnessMap) m.roughnessMap = picks.roughMap;
+      if (picks.roughMap) m.roughnessMap = picks.roughMap;
+      if (!debugSeen.has(m.name)) {
+        debugSeen.add(m.name);
+        console.log(`bobcat material: "${m.name}" → map=${m.map ? 'yes' : 'NO'}`);
+      }
       if ('metalness' in m) m.metalness = 0.0;
       if ('roughness' in m) m.roughness = Math.min(1, (m.roughness ?? 0.6) + 0.05);
+      // GLB ships these materials as alphaMode=BLEND — force them solid so
+      // the cat writes depth (water/grass don't bleed through) and so the
+      // diffuse renders at full strength rather than alpha-blended.
+      m.transparent = false;
+      m.opacity = 1.0;
+      m.depthTest = true;
+      m.depthWrite = true;
+      if (m.map) m.alphaTest = 0.35;
       if (m.color) {
         if (m.map) m.color.setRGB(1, 1, 1);
         else m.color.setRGB(0.78, 0.62, 0.42);
       }
-      // Subtle emissive fill so the unlit side doesn't crush to black.
+      // No emissive fill — the new fur diffuse already has shading baked in,
+      // so adding a warm fill flattens the markings and washes the body.
       if (m.emissive) {
-        m.emissive.setRGB(0.18, 0.16, 0.13);
-        m.emissiveIntensity = 0.4;
+        m.emissive.setRGB(0, 0, 0);
+        m.emissiveIntensity = 0;
       }
       m.needsUpdate = true;
     }

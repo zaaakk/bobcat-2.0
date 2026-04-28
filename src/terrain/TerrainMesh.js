@@ -44,6 +44,8 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uFogColorFar:  { value: new THREE.Color('#668db8') },
     uHorizonAlt:   { value: 1200.0 },    // metres above which sky tint dominates
     uExposure:     { value: 1.18 },      // pre-fog brightness lift on the lit albedo
+    uDebugTerrainGrade: { value: 1.0 },
+    uDebugRawFarFog: { value: 0.0 },
     uLanternPos:   { value: new THREE.Vector3() },
     uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
@@ -57,10 +59,13 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uDetailWorldSize:  { value: detailNoise
         ? new THREE.Vector2(detailNoise.worldWidth, detailNoise.worldHeight)
         : new THREE.Vector2(1, 1) },
-    uRidgeAmp:         { value: detailNoise ? detailNoise.ridgeAmp   : 0.0 },
-    uBedAmp:           { value: detailNoise ? detailNoise.bedAmp     : 0.0 },
-    uBedPeriod:        { value: detailNoise ? detailNoise.bedPeriod  : 18.0 },
-    uBedWarpAmp:       { value: detailNoise ? detailNoise.bedWarpAmp : 0.0 },
+    uRidgeAmp:         { value: detailNoise ? detailNoise.ridgeAmp      : 0.0 },
+    uBedAmp:           { value: detailNoise ? detailNoise.bedAmp        : 0.0 },
+    uBedPeriod:        { value: detailNoise ? detailNoise.bedPeriod     : 18.0 },
+    uBedRiserWidth:    { value: detailNoise ? detailNoise.bedRiserWidth : 0.62 },
+    uBedWarpAmp:       { value: detailNoise ? detailNoise.bedWarpAmp    : 0.0 },
+    uBedSlopeLo:       { value: detailNoise ? detailNoise.bedSlopeLo    : 0.10 },
+    uBedSlopeHi:       { value: detailNoise ? detailNoise.bedSlopeHi    : 0.24 },
     uDetailHas:        { value: detailNoise ? 1.0 : 0.0 },
     // Fine-tile detail: a small repeating noise texture sampled at world
     // coords / tileSize. Captures sub-meter features the broad world-aligned
@@ -114,7 +119,10 @@ export const TERRAIN_VERT = /* glsl */`
   uniform sampler2D uDetailTex;
   uniform sampler2D uFineTex;
   uniform sampler2D uCarveTex;
+  uniform float uMinZ;
+  uniform float uMaxZ;
   uniform vec2 uDemSize;
+  uniform vec2 uDemTexel;
   uniform vec2 uDetailWorldSize;
   uniform vec2 uPlaneSize;
   uniform vec2 uMeshSpacing;
@@ -122,7 +130,10 @@ export const TERRAIN_VERT = /* glsl */`
   uniform float uRidgeAmp;
   uniform float uBedAmp;
   uniform float uBedPeriod;
+  uniform float uBedRiserWidth;
   uniform float uBedWarpAmp;
+  uniform float uBedSlopeLo;
+  uniform float uBedSlopeHi;
   uniform float uDetailHas;
   uniform float uFineTileSize;
   uniform float uFineAmp;
@@ -141,38 +152,71 @@ export const TERRAIN_VERT = /* glsl */`
   varying vec3 vBitangent;
   varying float vEdgeFade;
 
+  float decodeHeight(float encodedH) {
+    return encodedH * (uMaxZ - uMinZ) + uMinZ;
+  }
+
+  float sampleDem(vec2 worldXZ) {
+    vec2 uv = (worldXZ / uDemSize) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    return decodeHeight(texture2D(uHeightmap, uv).r);
+  }
+
+  float sampleDemSlope(vec2 worldXZ) {
+    vec2 uv = (worldXZ / uDemSize) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec2 duv = uDemTexel * 2.0;
+    float hL = decodeHeight(texture2D(uHeightmap, clamp(uv - vec2(duv.x, 0.0), vec2(0.0), vec2(1.0))).r);
+    float hR = decodeHeight(texture2D(uHeightmap, clamp(uv + vec2(duv.x, 0.0), vec2(0.0), vec2(1.0))).r);
+    float hD = decodeHeight(texture2D(uHeightmap, clamp(uv - vec2(0.0, duv.y), vec2(0.0), vec2(1.0))).r);
+    float hU = decodeHeight(texture2D(uHeightmap, clamp(uv + vec2(0.0, duv.y), vec2(0.0), vec2(1.0))).r);
+    float sx = (hR - hL) / (4.0 * uDemSize.x * uDemTexel.x);
+    float sz = (hU - hD) / (4.0 * uDemSize.y * uDemTexel.y);
+    return length(vec2(sx, sz));
+  }
+
   // Detail is added on top of every DEM sample so the rendered surface IS
   // (DEM + detail), and the per-vertex normal computed below picks up the
   // perturbation from the detail field automatically.
   //
   // Two layers, both unsigned (always lift the surface):
-  //   1. ridged-multifractal lookup     — caprock bumps (texture)
-  //   2. elevation-keyed bedding pulse  — horizontal bench lines (sin of
-  //                                       hDem, domain-warped by the ridge
-  //                                       field so they wander naturally)
+  //   1. ridged-multifractal lookup    — caprock bumps (texture)
+  //   2. stepped-riser elevation transfer — caprock cliff/bench profile.
+  //      Built from the base DEM height: the displacement
+  //         (smoothstep(0, riserWidth, frac(h/period)) - frac(h/period)) * period
+  //      turns a smooth slope into floor(h/period)*period + smoothstep band,
+  //      i.e. a sequence of treads separated by near-vertical risers. The
+  //      riser-width fraction sets how sharp the cliff is: small width →
+  //      tighter, taller cliffs; larger width → softer ramps. Domain-warped
+  //      by the ridge field so the bedding lines wander like real outcrops.
   float sampleDetail(vec2 worldXZ, float hDem) {
     if (uDetailHas < 0.5) return 0.0;
-    // Broad layer: world-aligned ridged FBM in [0, 1] + bedding pulse.
+    // Broad layer: world-aligned ridged FBM in [0, 1] + stepped riser.
     vec2 uv = (worldXZ / uDetailWorldSize) + 0.5;
     uv = clamp(uv, vec2(0.0), vec2(1.0));
     float ridge = texture2D(uDetailTex, uv).r;
     float warpedH = hDem + ridge * uBedWarpAmp;
-    float bedTau  = 6.283185307179586 / uBedPeriod;
-    float pulse   = max(0.0, sin(warpedH * bedTau) - 0.5) * 2.0;
+    float bedFrac = fract(warpedH / uBedPeriod);
+    float riserCurve = smoothstep(0.0, uBedRiserWidth, bedFrac);
+    float pulse = (riserCurve - bedFrac) * uBedPeriod;  // metres
+    float demSlope = sampleDemSlope(worldXZ);
+    float slopeMask = smoothstep(uBedSlopeLo, uBedSlopeHi, demSlope);
+    float reliefMask = mix(0.08, 1.0, smoothstep(uBedSlopeLo * 0.80, uBedSlopeHi, demSlope));
     // Fine layer: tile-wrapped FBM in [-1, 1], domain-warped by the broad
     // ridge so the 16m tile pattern doesn't read as a regular grid.
     vec2 warpedXZ = worldXZ + vec2(ridge * 4.0, ridge * 3.0);
     float fine = texture2D(uFineTex, warpedXZ / uFineTileSize).r;
     // Two macro masks. The general one gates the smooth ridge + fine
     // layers (acceptable in transition zones). The bench mask is stricter:
-    // the bedding pulse is binary-ish, so a half-mask still leaves visible
-    // stairsteps. Confining benches to clearly-ridged areas keeps
-    // transitions smooth.
+    // the stepped riser amplifies the local slope at each riser band, so a
+    // half-mask in a transition zone still produces visible cliff edges.
+    // Confining the cliff/tread transfer to clearly-ridged areas keeps
+    // transitions smooth and reads as caprock outcrops, not stairsteps.
     float mask      = smoothstep(uMaskLo,      uMaskHi,      ridge);
     float benchMask = smoothstep(uBenchMaskLo, uBenchMaskHi, ridge);
-    return ridge * uRidgeAmp * mask
-         + pulse * uBedAmp   * benchMask
-         + fine  * uFineAmp  * mask;
+    return ridge * uRidgeAmp * mask * reliefMask
+         + pulse * uBedAmp   * benchMask * slopeMask
+         + fine  * uFineAmp  * mask * reliefMask;
   }
 
   // Detail-fade multiplier — keeps the detail patch (a 256-segment mesh
@@ -204,9 +248,7 @@ export const TERRAIN_VERT = /* glsl */`
   float sampleHEdge(vec2 worldXZ) {
     // Drop both the DEM and the detail through the edge fade so the padding
     // ring stays clean (no stray noise outside the world).
-    vec2 uv = (worldXZ / uDemSize) + 0.5;
-    uv = clamp(uv, vec2(0.0), vec2(1.0));
-    float hDem = texture2D(uHeightmap, uv).r;
+    float hDem = sampleDem(worldXZ);
     vec2 inside = abs(worldXZ) - uDemSize * 0.5;
     float outside = max(max(inside.x, inside.y), 0.0);
     float ef = clamp(outside / 4000.0, 0.0, 1.0);
@@ -286,6 +328,8 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform float uHorizonAlt;
   uniform vec3 uFogColorLow, uFogColorMid, uFogColorFar;
   uniform float uExposure;
+  uniform float uDebugTerrainGrade;
+  uniform float uDebugRawFarFog;
   uniform vec3 uLanternPos;
   uniform vec3 uLanternColor;
   uniform float uLanternRange;
@@ -300,29 +344,34 @@ export const TERRAIN_FRAG = /* glsl */`
   varying vec3 vBitangent;
   varying float vEdgeFade;
 
+  float ditherHash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
   void main() {
     vec2 worldXZ = vWorldPos.xz;
-    // Where the high-res patch covers this region, defer to it. The patch's
-    // surface follows the noise at 0.29m vertex spacing; the base mesh only
-    // resolves it at 26m, so in concave-down areas the base mesh chord can
-    // be ABOVE the patch's surface — leaving the cat (correctly grounded on
-    // the patch) appearing to sink below the base mesh's drawn ground. The
-    // patch material has IS_PATCH defined so it draws normally; the base
-    // mesh discards inside the patch's coverage and lets the patch fill it.
+    // Hide the coarse base near the patch centre so it cannot occlude the
+    // high-res patch/bobcat. Fade the base back in with a dithered transition
+    // near the far patch edge, so coarse triangles do not appear as a hard
+    // stretching band over detailed terrain. Dithered discard keeps the
+    // terrain opaque/depth-correct; true alpha blending would create sorting
+    // problems against plants, water and the bobcat.
     #ifndef IS_PATCH
-      // Discard well inside the patch's geometric edge so there's a 5m
-      // overlap zone where both meshes draw. Without enough overlap, the
-      // patch's faded detail at its outer edge doesn't match the base
-      // mesh's full-detail surface there, leaving a visible seam line.
-      // 5m comfortably covers the patch's detail-fade region (the outer
-      // 15% = 11m on a 75m halfSize), so the strip where both meshes
-      // draw is also where the patch's detail is mostly already faded
-      // and the surfaces are close to matching.
       vec2 patchLocal = worldXZ - uPatchCenter;
-      if (max(abs(patchLocal.x), abs(patchLocal.y)) < uPatchHalfSize - 5.0) {
+      float patchEdge = max(abs(patchLocal.x), abs(patchLocal.y));
+      float fadeIn = smoothstep(uPatchHalfSize * 0.72, uPatchHalfSize * 0.92, patchEdge);
+      if (ditherHash(gl_FragCoord.xy) > fadeIn) {
         discard;
       }
     #endif
+
+    if (uDebugRawFarFog > 0.5) {
+      gl_FragColor = vec4(uFogColorFar, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
+
     // Two scales of tiling, blended so close-up texture detail isn't a single
     // monotonous repeat. The far scale masks the wrap seam.
     vec2 tileUv = worldXZ / uTextureScale;
@@ -359,7 +408,7 @@ export const TERRAIN_FRAG = /* glsl */`
     // world space. This is the standard tangent-space normal mapping setup —
     // it's what makes the maps actually shift the lighting (an additive
     // world-space perturbation barely changes NdotL for upward-facing terrain).
-    float detailAmt = 1.0 - smoothstep(40.0, 480.0, distView);
+    float detailAmt = 1.0 - smoothstep(80.0, 900.0, distView);
     vec3 nRock   = texture2D(uNormalRock,   tileUv).rgb * 2.0 - 1.0;
     vec3 nGrass  = texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0;
     vec3 nGravel = texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0;
@@ -401,39 +450,38 @@ export const TERRAIN_FRAG = /* glsl */`
     // Brightness lift on the lit colour (before fog).
     lit *= uExposure;
 
-    // Aerial perspective: exponential extinction with two-stage colour mix.
-    // Closer haze is a desaturated cool grey, deep distance is rayleigh-blue.
-    // The mid colour gives the curve an inflection so terrain doesn't go from
-    // tan straight to deep blue in one step.
+    if (uDebugTerrainGrade > 0.5) {
+      // Local-contrast / split-tone grade. Runs before fog so the configured
+      // air colour can still own the horizon.
+      lit = (lit - 0.5) * 1.06 + 0.5;
+      float gradeLum = clamp(dot(lit, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+      vec3 warmHi = vec3(1.02, 1.00, 0.965);
+      vec3 coolLo = vec3(0.965, 0.985, 1.03);
+      lit *= mix(coolLo, warmHi, smoothstep(0.18, 0.78, gradeLum));
+    }
+
+    // Aerial perspective: one monotonic distance factor and a guaranteed
+    // far-colour takeover. This keeps the midday horizon from retaining dark
+    // terrain albedo while still allowing near/mid dust colour variation.
     vec3 viewRay = normalize(vWorldPos - cameraPosition);
     float dist = length(cameraPosition - vWorldPos);
-    // Denser extinction near the horizon and lower in the air column makes the
-    // desert distance read less like linear screen fog and more like dust haze.
     float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
     float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
     float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
-    float fogRaw = 1.0 - exp(-dist * uFogDensity * densityBoost);
-    // Stepped band so the falloff has visible character — not a single smooth
-    // ramp. Five soft bands; the floor() quantises while the +0.5 within-band
-    // smooth keeps each step's edge soft enough not to read as a hard line.
-    float fogBanded = floor(fogRaw * 5.0) / 5.0 + smoothstep(0.0, 0.2, fract(fogRaw * 5.0)) * 0.2;
-    float fog = mix(fogRaw, fogBanded, 0.55);
-    // Midground desaturate kick (40-70% fog): pulls the colour toward grey
-    // before the deep blue takes over at the horizon.
-    float fogStage = smoothstep(0.28, 0.82, fog);
-    vec3 fogCol = mix(
-      mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.5, fog)),
-      uFogColorFar,
-      fogStage
-    );
-    float midDesat = smoothstep(0.30, 0.55, fog) * (1.0 - smoothstep(0.55, 0.82, fog));
-    float fogLum = dot(fogCol, vec3(0.299, 0.587, 0.114));
-    fogCol = mix(fogCol, vec3(fogLum), midDesat * 0.35);
+    float fog = 1.0 - exp(-dist * uFogDensity * densityBoost);
+    fog = smoothstep(0.0, 1.0, clamp(fog, 0.0, 1.0));
+
+    vec3 nearFog = mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.45, fog));
+    vec3 fogCol = mix(nearFog, uFogColorFar, smoothstep(0.35, 0.85, fog));
 
     float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
-    fogCol += uSunColor * sunScatter * horizon * fog * 0.22;
+    fogCol += uSunColor * sunScatter * horizon * fog * (1.0 - smoothstep(0.60, 0.95, fog)) * 0.12;
     float altT = smoothstep(0.0, uHorizonAlt, vWorldPos.y - cameraPosition.y + 800.0);
     fogCol = mix(fogCol, uFogColorFar, altT * 0.15);
+
+    float horizonTakeover = smoothstep(0.85, 1.0, fog);
+    fogCol = mix(fogCol, uFogColorFar, horizonTakeover);
+    fog = mix(fog, 1.0, horizonTakeover);
 
     // Reduce the LIT scene's saturation as fog rises — the further away, the
     // less pure the underlying texture should read before being replaced by
@@ -443,14 +491,8 @@ export const TERRAIN_FRAG = /* glsl */`
 
     lit = mix(lit, fogCol, fog);
 
-    // Local-contrast / split-tone grade. Compresses dynamic range a little,
-    // adds a warm bias to highlights and a cool bias to shadows. Restrained.
-    lit = (lit - 0.5) * 1.12 + 0.5;
-    float gradeLum = clamp(dot(lit, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
-    vec3 warmHi = vec3(1.04, 1.00, 0.93);
-    vec3 coolLo = vec3(0.93, 0.97, 1.06);
-    lit *= mix(coolLo, warmHi, smoothstep(0.18, 0.78, gradeLum));
-
     gl_FragColor = vec4(lit, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
   }
 `;

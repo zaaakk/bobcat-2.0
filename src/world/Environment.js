@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 /**
  * Environment / day-night cycle. Owns:
- *   • the celestial state (sun direction over a 4-min cycle, moon at night)
+ *   • the celestial state (long day + fixed-length night cycle, moon at night)
  *   • palette interpolation (sky, fog, sun, hemi, ambient)
  *   • per-frame push of those values into every rendering subsystem that
  *     needs them (sky shader, terrain shader, plant shaders, the actual
@@ -21,8 +21,13 @@ import * as THREE from 'three';
  *   coverage, precip) can extend env.state and consumers pull from there.
  */
 export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, lantern }) {
-  const cycleSeconds = 240;
-  const phaseOffset = 0.18;
+  // Non-uniform clock: daylight/twilight get more real time, while the below-
+  // horizon half of the sun path remains at the old 120 seconds. This keeps
+  // night from dragging out when we lengthen the day.
+  const daySeconds = 270;
+  const nightSeconds = 120;
+  const cycleSeconds = daySeconds + nightSeconds;
+  const phaseOffsetSeconds = 43;
 
   const palette = {
     skyTopDay:    new THREE.Color('#74c2ff'),
@@ -37,7 +42,7 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     fogLowNight:  new THREE.Color('#3a4a64'),
     fogMidDay:    new THREE.Color('#96abc1'),
     fogMidNight:  new THREE.Color('#3f546f'),
-    fogFarDay:    new THREE.Color('#668db8'),
+    fogFarDay:    new THREE.Color('#6594e2'),
     fogFarNight:  new THREE.Color('#28395a'),
     sunDay:       new THREE.Color('#fff0d1'),
     sunDusk:      new THREE.Color('#ff9a63'),
@@ -82,14 +87,16 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
 
   function update(timeSec) {
     // ---- celestial geometry ----
-    const cycle = (timeSec / cycleSeconds + phaseOffset) % 1;
-    const theta = cycle * Math.PI * 2;
+    const cycleTime = (timeSec + phaseOffsetSeconds) % cycleSeconds;
+    const theta = cycleTime < daySeconds
+      ? (cycleTime / daySeconds) * Math.PI
+      : Math.PI + ((cycleTime - daySeconds) / nightSeconds) * Math.PI;
     state.sunDir.set(Math.cos(theta) * 0.28, Math.sin(theta), Math.sin(theta) * 0.96).normalize();
 
-    state.dayT      = THREE.MathUtils.smoothstep(state.sunDir.y, -0.14, 0.10);
+    state.dayT      = THREE.MathUtils.smoothstep(state.sunDir.y, -0.20, 0.18);
     state.nightT    = 1.0 - THREE.MathUtils.smoothstep(state.sunDir.y, -0.24, 0.02);
-    state.twilightT = THREE.MathUtils.smoothstep(state.sunDir.y, -0.22, 0.16) *
-      (1.0 - THREE.MathUtils.smoothstep(Math.abs(state.sunDir.y), 0.16, 0.58));
+    state.twilightT = THREE.MathUtils.smoothstep(state.sunDir.y, -0.26, 0.28) *
+      (1.0 - THREE.MathUtils.smoothstep(Math.abs(state.sunDir.y), 0.28, 0.70));
     state.directT   = Math.max(0, state.sunDir.y);
 
     const dayT = state.dayT;

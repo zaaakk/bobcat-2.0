@@ -81,6 +81,8 @@ export function createDust(scene, { max = 320 } = {}) {
         float fadeOut = 1.0 - smoothstep(0.45, 1.0, vT);
         float a = disc * fadeIn * fadeOut * 0.55;
         gl_FragColor = vec4(uColor, a);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `
   });

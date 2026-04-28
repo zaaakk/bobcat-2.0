@@ -143,7 +143,7 @@ export const SPECIES = [
   {
     id: 8,
     name: 'velvetmesquite',
-    file: '/assets/plants/velvetmesquite.png',
+    file: '/assets/plants/velvetmesquite.png?v=2',
     atlasIndex: 8,
     height: [4.0, 6.5],
     aspect: 1.1,

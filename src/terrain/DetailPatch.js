@@ -28,7 +28,14 @@ import { TERRAIN_VERT, TERRAIN_FRAG } from './TerrainMesh.js';
  * adds `IS_PATCH` so the shader's `patchDetailFade()` activates and
  * `uPatchCenter` gets read.
  */
-export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
+export function createDetailPatch({
+  terrain,
+  size = 300,
+  resolution = 512,
+  renderOrder = 1,
+  polygonOffsetFactor = -10,
+  polygonOffsetUnits = -10,
+} = {}) {
   const geometry = new THREE.PlaneGeometry(size, size, resolution, resolution);
   geometry.rotateX(-Math.PI / 2);
 
@@ -72,8 +79,8 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
     // by a meaningful margin guarantees it occludes base wherever they
     // both draw.
     polygonOffset: true,
-    polygonOffsetFactor: -10,
-    polygonOffsetUnits: -10,
+    polygonOffsetFactor,
+    polygonOffsetUnits,
   });
 
   const mesh = new THREE.Mesh(geometry, material);
@@ -87,7 +94,7 @@ export function createDetailPatch({ terrain, size = 150, resolution = 512 }) {
   mesh.receiveShadow = false;
   // Renders after the base mesh, so the polygon offset's depth-bias decides
   // who wins on overlapping pixels.
-  mesh.renderOrder = 1;
+  mesh.renderOrder = renderOrder;
 
   /**
    * Move the patch to centre on (x, z). Call once per frame with the

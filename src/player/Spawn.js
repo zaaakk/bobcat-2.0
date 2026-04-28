@@ -1,10 +1,8 @@
 /**
  * Pick a spawn point for the player: prefer a flattish spot inside the
- * vegetation zone (so the bobcat lands somewhere with cover and visible
- * plants, not on a bare ridge or in a wasteland edge cell).
- *
- * The plant placer uses a finite playRadius around origin; spawning far
- * outside leaves the bobcat in a vegetation-free strip.
+ * dense inner vegetation zone (so the bobcat lands somewhere with cover and
+ * visible plants, not on a bare ridge). The outer DEM also has a coarser
+ * vegetation pass for long-distance roaming.
  */
 export function chooseSpawnPoint(terrainQuery, maxRadius = 2800) {
   let fallback = {

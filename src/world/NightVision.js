@@ -34,6 +34,7 @@ export function createNightVision(renderer) {
     uLensCenter: { value: new THREE.Vector2(0.5, 0.5) },
     uLensRadius: { value: 0.22 }, // fraction of min(screen w, h)
     uLensFeather: { value: 0.10 }, // soft edge
+    uPostGrade: { value: 0 },
     // Defaults dialled in via the debug menu — slightly desaturated, lifted,
     // and softened to take the edge off without losing the texture character.
     uSaturation: { value: 0.9 },
@@ -55,6 +56,7 @@ export function createNightVision(renderer) {
       uniform float uTime, uNight, uAspect;
       uniform vec2 uLensCenter;
       uniform float uLensRadius, uLensFeather;
+      uniform float uPostGrade;
       uniform float uSaturation, uBrightness, uContrast;
       varying vec2 vUv;
 
@@ -72,7 +74,8 @@ export function createNightVision(renderer) {
       }
 
       void main() {
-        vec3 src = grade(texture2D(uScene, vUv).rgb);
+        vec3 raw = texture2D(uScene, vUv).rgb;
+        vec3 src = uPostGrade > 0.5 ? grade(raw) : raw;
 
         // Scaled UV so the lens reads as a circle, not an ellipse.
         vec2 d = vUv - uLensCenter;
@@ -83,6 +86,8 @@ export function createNightVision(renderer) {
         float k = lens * uNight;
         if (k <= 0.001) {
           gl_FragColor = vec4(src, 1.0);
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
           return;
         }
 
@@ -113,6 +118,8 @@ export function createNightVision(renderer) {
         nv *= 0.85 + 0.25 * vignette;
 
         gl_FragColor = vec4(mix(src, nv, k), 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `
   });
@@ -134,7 +141,13 @@ export function createNightVision(renderer) {
 
   function render(worldScene, worldCamera, time, nightAmount) {
     uniforms.uTime.value = time;
-    uniforms.uNight.value = enabled ? THREE.MathUtils.clamp(nightAmount, 0, 1) : 0;
+    const night = enabled ? THREE.MathUtils.clamp(nightAmount, 0, 1) : 0;
+    uniforms.uNight.value = night;
+    if (night <= 0.001 && uniforms.uPostGrade.value < 0.5) {
+      renderer.setRenderTarget(null);
+      renderer.render(worldScene, worldCamera);
+      return;
+    }
     renderer.setRenderTarget(target);
     renderer.clear();
     renderer.render(worldScene, worldCamera);

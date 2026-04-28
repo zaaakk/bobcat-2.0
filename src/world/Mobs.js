@@ -121,11 +121,12 @@ export function createVultureType(texture, defaults = {}) {
       const cy = anchor.y + Math.sin(t * 0.4 + state.phase * 1.3) * 1.6;
       mesh.position.set(cx, cy, cz);
 
-      // Yaw so the sprite's "head" points in the direction of motion. The
-      // sprite was authored head-up (texture +Y in the PNG = bird's head), so
-      // after rotation.x = -π/2, yaw maps to rotation around world Y.
-      // Direction of motion at this phase is the tangent: (-sin(p), 0, cos(p)).
-      const yaw = Math.atan2(-Math.cos(state.phase), -Math.sin(state.phase));
+      // Yaw so the sprite's "head" points in the direction of motion. With
+      // PlaneGeometry's authored +Y as the bird's head and rotation.x=-π/2
+      // baked in (Euler order YXZ), the head's world direction works out to
+      // (-sin(yaw), 0, -cos(yaw)). Velocity tangent at phase p is
+      // (-sin(p), 0, cos(p)), so head = velocity ⇒ yaw = π - phase.
+      const yaw = Math.PI - state.phase;
       // Bank tilt: lean inward into the turn. ~12° looks soaring-natural.
       const bank = 0.20;
       tmpEuler.set(-Math.PI / 2, yaw, bank, 'YXZ');

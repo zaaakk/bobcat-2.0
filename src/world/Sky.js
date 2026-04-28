@@ -39,6 +39,8 @@ export function createSky(scene) {
         float horizonScatter = pow(sd, 8.0) * haze * 0.35;
         base += uSunColor * (disk * 1.6 + glow + horizonScatter);
         gl_FragColor = vec4(base, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `,
     side: THREE.BackSide,

@@ -25,55 +25,47 @@ export function createWaterRenderer({ pools, scene }) {
   }
 
   const SEGMENTS = 32;
-  const vertsPerDisc = SEGMENTS + 2;
-  const trisPerDisc  = SEGMENTS;
-  const totalVerts = pools.length * vertsPerDisc;
-  const totalTris  = pools.length * trisPerDisc;
-
-  const positions = new Float32Array(totalVerts * 3);
-  const aDepth    = new Float32Array(totalVerts);
-  const aSeed     = new Float32Array(totalVerts);
-  const indices   = new Uint32Array(totalTris * 3);
-
-  let vi = 0, ti = 0;
+  const geometries = [];
   for (let pi = 0; pi < pools.length; pi++) {
     const p = pools[pi];
     const seed = (pi * 13.37) % 100;
+    const positions = new Float32Array((SEGMENTS + 2) * 3);
+    const aDepth = new Float32Array(SEGMENTS + 2);
+    const aSeed = new Float32Array(SEGMENTS + 2);
+    const indices = new Uint16Array(SEGMENTS * 3);
 
     // centre vertex
-    positions[vi * 3 + 0] = p.x;
-    positions[vi * 3 + 1] = p.y;
-    positions[vi * 3 + 2] = p.z;
-    aDepth[vi] = 1.0;
-    aSeed[vi] = seed;
-    const centreIdx = vi;
-    vi++;
+    positions[0] = p.x;
+    positions[1] = p.y;
+    positions[2] = p.z;
+    aDepth[0] = 1.0;
+    aSeed[0] = seed;
 
     // rim vertices — slight Y dip so the surface tucks at the shoreline.
-    const rimStart = vi;
+    const rimStart = 1;
     for (let s = 0; s <= SEGMENTS; s++) {
       const a = (s / SEGMENTS) * Math.PI * 2;
+      const vi = rimStart + s;
       positions[vi * 3 + 0] = p.x + Math.cos(a) * p.r;
       positions[vi * 3 + 1] = p.y - 0.04;
       positions[vi * 3 + 2] = p.z + Math.sin(a) * p.r;
       aDepth[vi] = 0.0;
       aSeed[vi] = seed;
-      vi++;
     }
     for (let s = 0; s < SEGMENTS; s++) {
-      indices[ti * 3 + 0] = centreIdx;
-      indices[ti * 3 + 1] = rimStart + s;
-      indices[ti * 3 + 2] = rimStart + s + 1;
-      ti++;
+      indices[s * 3 + 0] = 0;
+      indices[s * 3 + 1] = rimStart + s;
+      indices[s * 3 + 2] = rimStart + s + 1;
     }
-  }
 
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geom.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
-  geom.setAttribute('aSeed', new THREE.BufferAttribute(aSeed, 1));
-  geom.setIndex(new THREE.BufferAttribute(indices, 1));
-  geom.computeBoundingSphere();
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('aDepth', new THREE.BufferAttribute(aDepth, 1));
+    geom.setAttribute('aSeed', new THREE.BufferAttribute(aSeed, 1));
+    geom.setIndex(new THREE.BufferAttribute(indices, 1));
+    geom.computeBoundingSphere();
+    geometries.push(geom);
+  }
 
   const uniforms = {
     uTime:     { value: 0 },
@@ -90,12 +82,11 @@ export function createWaterRenderer({ pools, scene }) {
   const material = new THREE.ShaderMaterial({
     uniforms,
     transparent: true,
-    // depthWrite: true so the water occludes things behind it correctly
-    // (with depthWrite off and a merged 30-pool geometry, the transparency
-    // sort fires once for the whole batch and far things behind cat could
-    // wrongly draw over cat in some camera angles). We accept that in
-    // exchange for the cat NOT being weirdly overlaid by faraway water.
-    depthWrite: true,
+    // One mesh per pool lets Three sort transparent water at pool granularity
+    // instead of treating every pool as one giant transparent object. Keep
+    // depthWrite off so a far pool cannot stamp depth over unrelated pools or
+    // the bobcat; opaque scene depth still rejects water behind the cat.
+    depthWrite: false,
     side: THREE.DoubleSide,
     vertexShader: /* glsl */`
       attribute float aDepth;
@@ -176,14 +167,21 @@ export function createWaterRenderer({ pools, scene }) {
         alpha = mix(alpha, 0.78, fresnel * 0.55);
 
         gl_FragColor = vec4(col, alpha);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
       }
     `,
   });
 
-  const mesh = new THREE.Mesh(geom, material);
-  mesh.frustumCulled = false;
-  mesh.renderOrder = 1;     // after terrain so transparency sorts cleanly
-  scene.add(mesh);
+  const group = new THREE.Group();
+  group.frustumCulled = false;
+  for (const geom of geometries) {
+    const poolMesh = new THREE.Mesh(geom, material);
+    poolMesh.frustumCulled = false;
+    poolMesh.renderOrder = 1;     // after terrain so transparency sorts cleanly
+    group.add(poolMesh);
+  }
+  scene.add(group);
 
   /**
    * Per-frame tick. ctx fields used:
@@ -202,10 +200,10 @@ export function createWaterRenderer({ pools, scene }) {
   }
 
   function dispose() {
-    scene.remove(mesh);
-    geom.dispose();
+    scene.remove(group);
+    for (const geom of geometries) geom.dispose();
     material.dispose();
   }
 
-  return { mesh, update, dispose };
+  return { mesh: group, update, dispose };
 }

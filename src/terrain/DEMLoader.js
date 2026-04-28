@@ -41,16 +41,32 @@ export async function loadDEM(pngUrl, jsonUrl, onProgress) {
     }
   }
   // The detail patch samples this DEM at 0.29m vertex spacing — well below
-  // the 16m source resolution. Without smoothing, the patch's fine vertices
-  // resolve the DEM's piecewise-bilinear cell structure: each 16m cell is
-  // a flat bilinear patch, and the gradient changes abruptly at cell
-  // boundaries, reading as stair-step facets. A small Gaussian blur on
-  // the loaded DEM (3×3, radius=1 cell) smooths the cell-boundary gradient
-  // changes without significantly affecting features at >50m scale —
-  // which is the only scale the source data is reliable at anyway.
+  // the 16m source resolution. Two artifacts to fight:
+  //
+  //   (1) Cell-boundary facets — each 16m cell is a flat bilinear patch and
+  //       the gradient changes abruptly at cell edges. A 3×3 Gaussian blur
+  //       (kernel 1 2 1 / 2 4 2 / 1 2 1) smooths the gradient. We run it
+  //       twice; that's mathematically equivalent to a 5×5 binomial blur
+  //       (1 4 6 4 1 outer-product) and doubles the effective radius.
+  //
+  //   (2) Integer-metre quantization in the source — Mapzen tiles store
+  //       elevations to the nearest metre for most cells. On a long shallow
+  //       slope, many adjacent cells share the same integer value, so the
+  //       blur (which is a *spatial* low-pass) can't reconstruct a smooth
+  //       gradient — every blurred-window contains the same integer value.
+  //       The visible result is horizontal contour-line steps stepping up
+  //       a slope. Fix: add a low-amplitude smooth value-noise dither
+  //       (~0.6m amp, ~40m wavelength) directly to the blurred heights. It
+  //       injects fractional metres so the integer plateaus disappear,
+  //       without touching macro shape (40m is below any feature the source
+  //       data resolves anyway).
+  //
   // CPU groundY (sampleHeight) and GPU heightmap texture both read this
-  // post-blur data, so the cat tracks against the rendered surface.
-  const blurred = gaussianBlur3x3(data, width, height);
+  // post-blur, post-dither data, so the cat tracks against the rendered surface.
+  let blurred = gaussianBlur3x3(data, width, height);
+  blurred = gaussianBlur3x3(blurred, width, height);
+  const ditherCellsPerCycle = 40 / meta.pixelSizeMeters;
+  addValueNoiseDither(blurred, width, height, ditherCellsPerCycle, 0.6, 0.913);
   // Recompute min/max over the smoothed data so downstream code (the
   // height-bands fragment shader, etc.) sees the actual range.
   let bMinZ = Infinity, bMaxZ = -Infinity;
@@ -73,6 +89,42 @@ export async function loadDEM(pngUrl, jsonUrl, onProgress) {
     worldHeight: meta.worldHeightMeters,
     bbox: meta.bbox
   };
+}
+
+/**
+ * Adds smooth value-noise dither (in place) to break integer-metre plateaus
+ * in the source DEM. Kernel: 4 corner hashes, smoothstep-blended bilinearly.
+ *
+ *   cellsPerCycle  cells per noise-grid period (e.g. 2.5 for 40m on a 16m
+ *                  DEM). Smaller → finer dither.
+ *   amp            peak displacement in metres (the noise is in [-0.5, 0.5]
+ *                  before this multiplier, so dither lands in ±amp/2).
+ */
+function addValueNoiseDither(data, w, h, cellsPerCycle, amp, seed) {
+  const inv = 1 / cellsPerCycle;
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const fx = i * inv, fy = j * inv;
+      const ix = Math.floor(fx), iy = Math.floor(fy);
+      const tx = fx - ix, ty = fy - iy;
+      const a = hashCell(ix,     iy,     seed);
+      const b = hashCell(ix + 1, iy,     seed);
+      const c = hashCell(ix,     iy + 1, seed);
+      const d = hashCell(ix + 1, iy + 1, seed);
+      const sx = tx * tx * (3 - 2 * tx);
+      const sy = ty * ty * (3 - 2 * ty);
+      const top = a * (1 - sx) + b * sx;
+      const bot = c * (1 - sx) + d * sx;
+      data[j * w + i] += (top * (1 - sy) + bot * sy - 0.5) * amp;
+    }
+  }
+}
+
+function hashCell(x, y, seed) {
+  let h = (Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ ((seed * 1e6) | 0)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h % 1000000) / 1000000;
 }
 
 /**
@@ -135,12 +187,14 @@ function loadImage(src, onProgress) {
 export function heightmapTexture(THREE, dem) {
   const halfData = new Uint16Array(dem.data.length);
   const renderData = new Float32Array(dem.data.length);
+  const heightOffset = dem.minZ;
+  const heightScale = Math.max(1e-6, dem.maxZ - dem.minZ);
   for (let i = 0; i < dem.data.length; i++) {
-    const h = THREE.DataUtils.toHalfFloat(dem.data[i]);
+    const h = THREE.DataUtils.toHalfFloat((dem.data[i] - heightOffset) / heightScale);
     halfData[i] = h;
     // Mirror the exact R16F quantization on the CPU so object placement and
     // terrain queries use the same heights the GPU rasterizes.
-    renderData[i] = THREE.DataUtils.fromHalfFloat(h);
+    renderData[i] = THREE.DataUtils.fromHalfFloat(h) * heightScale + heightOffset;
   }
   const tex = new THREE.DataTexture(
     halfData, dem.width, dem.height,
@@ -152,7 +206,7 @@ export function heightmapTexture(THREE, dem) {
   tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = false;
   tex.needsUpdate = true;
-  tex.userData = { heightOffset: 0, heightScale: 1 };
+  tex.userData = { heightOffset, heightScale };
   dem.renderData = renderData;
   return tex;
 }

@@ -31,8 +31,8 @@ async function main() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMapping = THREE.NoToneMapping;
+  renderer.toneMappingExposure = 1.0;
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 25000);
@@ -54,8 +54,12 @@ async function main() {
 
   // Debug toggles for headless probing.
   const sp = new URLSearchParams(window.location.search);
-  if (sp.has('noplants')) for (const t of world.plants.tiers) t.mesh.visible = false;
+  if (sp.has('noplants')) {
+    for (const t of world.plants.tiers) t.mesh.visible = false;
+    if (world.shadows) world.shadows.setPlantEnabled(false);
+  }
   if (sp.has('noterrain')) world.terrain.mesh.visible = false;
+  if (sp.has('noshadows') && world.shadows) world.shadows.setEnabled(false);
 
   // ---------- player ----------
   setLoadingProgress(0.88, 'Waking bobcat…');
@@ -130,15 +134,20 @@ async function main() {
       followLerp: 0.25
     });
   }
-  // Distant background kettles. 4 anchors, each with 2-3 birds. Player sees
-  // far-off circling shapes that grow if they wander toward them. Anchors
-  // come from terrainQuery.samplePoints — same primitive any future
-  // landscape-driven mob (deer, javelina) will use.
-  const kettleAnchors = world.terrainQuery.samplePoints({
-    count: 4,
-    worldFraction: 0.85,
-    awayFrom: { x: spawn.x, z: spawn.z, distance: 600 }
-  });
+  // Distant background kettles. 4 anchors at random bearings 700–2200m from
+  // spawn — close enough that the wing-span sprite still subtends a few
+  // pixels (5m sprite at 9km = sub-pixel, basically invisible), but far
+  // enough to read as "off in the distance" rather than another personal
+  // kettle. wingSpan is bumped to ~12m here for the same readability reason.
+  const kettleAnchors = [];
+  for (let k = 0; k < 4; k++) {
+    const bearing = (k / 4) * Math.PI * 2 + Math.random() * 0.6;
+    const dist = 700 + Math.random() * 1500;
+    const ax = spawn.x + Math.cos(bearing) * dist;
+    const az = spawn.z + Math.sin(bearing) * dist;
+    const ay = world.terrainQuery.sampleGroundY(ax, az);
+    kettleAnchors.push({ x: ax, y: ay, z: az });
+  }
   for (const anchor of kettleAnchors) {
     const birdCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
     const kRadius = 60 + Math.random() * 40;
@@ -149,6 +158,7 @@ async function main() {
         radius: kRadius + i * 6,
         altitude: kAltitude + i * 3,
         angularSpeed: 0.10 + Math.random() * 0.06,
+        wingSpan: 12,
       });
     }
   }
@@ -196,6 +206,87 @@ async function main() {
             nightVision.uniforms.uContrast.value = 0.9;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
+          const postGradeMode = () => nightVision.uniforms.uPostGrade.value > 0.5 ? 'ON' : 'OFF';
+          const postGradeBtn = panelButton(el, `Post grade: ${postGradeMode()}`, () => {
+            nightVision.uniforms.uPostGrade.value = nightVision.uniforms.uPostGrade.value > 0.5 ? 0.0 : 1.0;
+            postGradeBtn.textContent = `Post grade: ${postGradeMode()}`;
+          });
+          const toneMode = () => renderer.toneMapping === THREE.NoToneMapping ? 'OFF' : 'ACES';
+          const toneBtn = panelButton(el, `Tone map: ${toneMode()}`, () => {
+            renderer.toneMapping = renderer.toneMapping === THREE.NoToneMapping
+              ? THREE.ACESFilmicToneMapping
+              : THREE.NoToneMapping;
+            toneBtn.textContent = `Tone map: ${toneMode()}`;
+          });
+          const u = world.terrain.uniforms;
+          const gradeMode = () => u.uDebugTerrainGrade.value > 0.5 ? 'ON' : 'OFF';
+          const gradeBtn = panelButton(el, `Terrain grade: ${gradeMode()}`, () => {
+            u.uDebugTerrainGrade.value = u.uDebugTerrainGrade.value > 0.5 ? 0.0 : 1.0;
+            gradeBtn.textContent = `Terrain grade: ${gradeMode()}`;
+          });
+          const rawFogMode = () => u.uDebugRawFarFog.value > 0.5 ? 'ON' : 'OFF';
+          const rawFogBtn = panelButton(el, `Raw far fog: ${rawFogMode()}`, () => {
+            u.uDebugRawFarFog.value = u.uDebugRawFarFog.value > 0.5 ? 0.0 : 1.0;
+            rawFogBtn.textContent = `Raw far fog: ${rawFogMode()}`;
+          });
+          if (world.shadows) {
+            const shadowsMode = () => world.shadows.enabled ? 'ON' : 'OFF';
+            const shadowsBtn = panelButton(el, `Shadows: ${shadowsMode()}`, () => {
+              world.shadows.setEnabled(!world.shadows.enabled);
+              shadowsBtn.textContent = `Shadows: ${shadowsMode()}`;
+            });
+            const catShadowMode = () => world.shadows.catEnabled ? 'ON' : 'OFF';
+            const catShadowBtn = panelButton(el, `Cat shadow: ${catShadowMode()}`, () => {
+              world.shadows.setCatEnabled(!world.shadows.catEnabled);
+              catShadowBtn.textContent = `Cat shadow: ${catShadowMode()}`;
+            });
+            const plantShadowMode = () => world.shadows.plantEnabled ? 'ON' : 'OFF';
+            const plantShadowBtn = panelButton(el, `Plant shadows: ${plantShadowMode()}`, () => {
+              world.shadows.setPlantEnabled(!world.shadows.plantEnabled);
+              plantShadowBtn.textContent = `Plant shadows: ${plantShadowMode()}`;
+            });
+            const s = world.shadows.settings;
+            panelRow(el, {
+              label: 'Cat shadow dark', min: 0, max: 1.2, step: 0.01,
+              value: s.catOpacity,
+              onInput: v => s.catOpacity = v
+            });
+            panelRow(el, {
+              label: 'Cat shadow lift', min: 0, max: 0.5, step: 0.005,
+              value: s.catOffset,
+              onInput: v => s.catOffset = v
+            });
+            panelRow(el, {
+              label: 'Cat shadow width', min: 0.15, max: 1.2, step: 0.01,
+              value: s.catWidth,
+              onInput: v => s.catWidth = v
+            });
+            panelRow(el, {
+              label: 'Cat shadow length', min: 0.3, max: 2.4, step: 0.01,
+              value: s.catLength,
+              onInput: v => s.catLength = v
+            });
+            panelRow(el, {
+              label: 'Plant shadow dark', min: 0, max: 1.2, step: 0.01,
+              value: s.plantOpacity,
+              onInput: v => s.plantOpacity = v
+            });
+            panelRow(el, {
+              label: 'Plant shadow lift', min: 0, max: 0.5, step: 0.005,
+              value: s.plantOffset,
+              onInput: v => s.plantOffset = v
+            });
+            panelRow(el, {
+              label: 'Plant shadow size', min: 0.25, max: 2.5, step: 0.01,
+              value: s.plantScale,
+              onInput: v => s.plantScale = v
+            });
+            panelRow(el, {
+              label: 'Plant shadow dist', min: 100, max: 1800, step: 10,
+              value: s.plantMaxDistance,
+              onInput: v => s.plantMaxDistance = v
+            });
+          }
         }
       },
       {
@@ -211,19 +302,36 @@ async function main() {
             onInput: v => u.uRidgeAmp.value = v,
           });
           panelRow(el, {
-            label: 'Bench amp (m)', min: 0, max: 12, step: 0.1,
+            // Mix factor on the cliff/bench transfer — 0 disables, 1 = full
+            // staircase, >1 overshoots into super-vertical risers.
+            label: 'Bench mix', min: 0, max: 1.5, step: 0.05,
             value: u.uBedAmp.value,
             onInput: v => u.uBedAmp.value = v,
           });
           panelRow(el, {
-            label: 'Bench period (m)', min: 4, max: 60, step: 0.5,
+            label: 'Bench period (m)', min: 4, max: 40, step: 0.5,
             value: u.uBedPeriod.value,
             onInput: v => u.uBedPeriod.value = v,
+          });
+          panelRow(el, {
+            label: 'Riser width', min: 0.05, max: 0.9, step: 0.01,
+            value: u.uBedRiserWidth.value,
+            onInput: v => u.uBedRiserWidth.value = v,
           });
           panelRow(el, {
             label: 'Bench warp (m)', min: 0, max: 30, step: 0.1,
             value: u.uBedWarpAmp.value,
             onInput: v => u.uBedWarpAmp.value = v,
+          });
+          panelRow(el, {
+            label: 'Bench slope lo', min: 0, max: 0.3, step: 0.005,
+            value: u.uBedSlopeLo.value,
+            onInput: v => u.uBedSlopeLo.value = v,
+          });
+          panelRow(el, {
+            label: 'Bench slope hi', min: 0, max: 0.4, step: 0.005,
+            value: u.uBedSlopeHi.value,
+            onInput: v => u.uBedSlopeHi.value = v,
           });
           panelRow(el, {
             label: 'Fine amp (m)', min: 0, max: 2.5, step: 0.01,
@@ -256,27 +364,33 @@ async function main() {
             onInput: v => u.uBenchMaskHi.value = v,
           });
           panelButton(el, 'Reset', () => {
-            u.uRidgeAmp.value = 2.1;
-            u.uBedAmp.value = 1.6;
-            u.uBedPeriod.value = 20.0;
+            u.uRidgeAmp.value = 1.5;
+            u.uBedAmp.value = 0.62;
+            u.uBedPeriod.value = 18.0;
+            u.uBedRiserWidth.value = 0.62;
             u.uBedWarpAmp.value = 14.0;
-            u.uFineAmp.value = 0.25;
-            u.uFineTileSize.value = 16.0;
+            u.uBedSlopeLo.value = 0.10;
+            u.uBedSlopeHi.value = 0.24;
+            u.uFineAmp.value = 0.08;
+            u.uFineTileSize.value = 24.0;
             u.uMaskLo.value = 0.20;
             u.uMaskHi.value = 0.55;
-            u.uBenchMaskLo.value = 0.55;
-            u.uBenchMaskHi.value = 0.78;
+            u.uBenchMaskLo.value = 0.24;
+            u.uBenchMaskHi.value = 0.50;
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           // Wireframe toggle — toggles on the base terrain AND the detail
           // patch so you can see both grid resolutions at once. Shows the
           // 26m base spacing vs. the 0.29m patch spacing where they overlap.
           const baseMat = world.terrain.material;
-          const patchMat = world.detailPatch.material;
+          const patchMats = (world.detailPatches && world.detailPatches.length
+            ? world.detailPatches
+            : [world.detailPatch]
+          ).map(p => p.material);
           const wireBtn = panelButton(el, `Wireframe: ${baseMat.wireframe ? 'ON' : 'OFF'}`, () => {
             const next = !baseMat.wireframe;
             baseMat.wireframe = next;
-            patchMat.wireframe = next;
+            for (const patchMat of patchMats) patchMat.wireframe = next;
             wireBtn.textContent = `Wireframe: ${next ? 'ON' : 'OFF'}`;
           });
           // Note: TerrainQuery still uses the bake-time defaults for CPU
@@ -373,13 +487,16 @@ async function main() {
     environment.update(t);
     world.update(dt, t, {
       cameraPosition: camera.position,
+      camera,
       sunDir: environment.state.sunDir,
       sunColor: environment.state.sunColor,
       skyTop: environment.state.skyTop,
       haze: environment.state.haze,
+      environment: environment.state,
     });
     // Slide the high-res detail patch to centre on the bobcat each frame.
     world.updateDetailPatch(bobcat.position.x, bobcat.position.z);
+    if (world.shadows) world.shadows.updateCat(bobcat, environment.state);
 
     // Park the lantern just above the bobcat with a slight bob.
     lantern.position.set(
@@ -458,4 +575,3 @@ async function main() {
   }
   requestAnimationFrame(frame);
 }
-

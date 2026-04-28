@@ -118,26 +118,33 @@ export class TerrainQuery {
    *
    *   1. Ridged multifractal — the baked texture, in [0, 1]. Multiplied by
    *      ridgeAmp to give caprock-style metre-scale bumps.
-   *   2. Bedding pulse — sin(elevation/period) thresholded; gives horizontal
-   *      bench lines at fixed vertical intervals. Domain-warped by the
-   *      ridge field so the lines wander like real outcrops.
+   *   2. Stepped riser — elevation transfer that turns a smooth slope into
+   *      tread + near-vertical riser bands. Pulse formula:
+   *        (smoothstep(0, riserWidth, frac(h/period)) - frac(h/period)) * period
+   *      With bedAmp=1 the rendered surface is a true staircase; <1 mixes
+   *      between the original slope and the staircase. Domain-warped by the
+   *      ridge field so bedding lines wander.
    *
    * Both layers are unsigned (always lift, never lower) so the surface
    * gets bumpier without dipping below the DEM. Returns 0 with no detail.
    *
-   * Note: the bedding pulse needs the *base* DEM height as input, not the
+   * Note: the riser pulse needs the *base* DEM height as input, not the
    * already-displaced surface — otherwise we'd have a feedback loop. This
    * matches the GPU shader, which reads hDem before adding the pulse.
    */
   sampleDetail(x, z) {
     const dn = this.detailNoise;
     if (!dn) return 0;
-    // Broad layer (world-aligned ridged FBM + bedding pulse).
+    // Broad layer (world-aligned ridged FBM + stepped riser).
     const ridge = this._sampleRidge01(x, z);
     const baseDem = this._sampleDemHeight(x, z);
     const warpedH = baseDem + ridge * dn.bedWarpAmp;
-    const bedTau = 6.283185307179586 / dn.bedPeriod;
-    const pulse = Math.max(0, Math.sin(warpedH * bedTau) - 0.5) * 2;
+    const bedFrac = warpedH / dn.bedPeriod - Math.floor(warpedH / dn.bedPeriod);
+    const riserCurve = smoothstep(0, dn.bedRiserWidth, bedFrac);
+    const pulse = (riserCurve - bedFrac) * dn.bedPeriod;
+    const demSlope = this._sampleDemSlopeRatio(x, z);
+    const slopeMask = smoothstep(dn.bedSlopeLo, dn.bedSlopeHi, demSlope);
+    const reliefMask = 0.08 + 0.92 * smoothstep(dn.bedSlopeLo * 0.80, dn.bedSlopeHi, demSlope);
     // Fine layer (tile-wrapped FBM in [-1, 1]), domain-warped by the
     // broad ridge value so the 16m tile pattern doesn't read as regular.
     const fine = dn.fine ? this._sampleFineTile(x + ridge * 4.0, z + ridge * 3.0) : 0;
@@ -147,9 +154,20 @@ export class TerrainQuery {
     // clearly-ridged areas (avoids partial-mask stairsteps in transitions).
     const mask      = smoothstep(dn.maskLo,      dn.maskHi,      ridge);
     const benchMask = smoothstep(dn.benchMaskLo, dn.benchMaskHi, ridge);
-    return ridge * dn.ridgeAmp * mask
-         + pulse * dn.bedAmp   * benchMask
-         + fine  * fineAmp     * mask;
+    return ridge * dn.ridgeAmp * mask * reliefMask
+         + pulse * dn.bedAmp   * benchMask * slopeMask
+         + fine  * fineAmp     * mask * reliefMask;
+  }
+
+  _sampleDemSlopeRatio(x, z) {
+    const ds = 2 * this.dem.pixelSizeX;
+    const hL = this._sampleDemHeight(x - ds, z);
+    const hR = this._sampleDemHeight(x + ds, z);
+    const hD = this._sampleDemHeight(x, z - ds);
+    const hU = this._sampleDemHeight(x, z + ds);
+    const dzdx = (hR - hL) / (2 * ds);
+    const dzdz = (hU - hD) / (2 * ds);
+    return Math.hypot(dzdx, dzdz);
   }
 
   /**

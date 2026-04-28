@@ -17,6 +17,7 @@ export function placeVegetation({
   cellSize = 5.0,
   globalDensity = 1.0,
   jitter = 1.0,
+  innerRadius = 0,
   playRadius = 5500,
   maxInstances = 350_000
 }) {
@@ -34,6 +35,7 @@ export function placeVegetation({
   const playOriginX = -playSpan * 0.5;
   const playOriginZ = -playSpan * 0.5;
   const r2 = playRadius * playRadius;
+  const innerR2 = innerRadius * innerRadius;
 
   const elevRange = Math.max(1, dem.maxZ - dem.minZ);
   const maxClusterMul = Math.max(...SPECIES.map(s => s.clusterCount ? s.clusterCount[1] : 1));
@@ -74,7 +76,8 @@ export function placeVegetation({
 
       const baseX = playOriginX + (i + 0.5) * cellSize;
       const baseZ = playOriginZ + (j + 0.5) * cellSize;
-      if (baseX * baseX + baseZ * baseZ > r2) continue;
+      const baseD2 = baseX * baseX + baseZ * baseZ;
+      if (baseD2 > r2 || baseD2 < innerR2) continue;
 
       const jx = jitterNoise(i * 0.31, j * 0.27);
       const jz = jitterNoise(i * 0.19 + 7.1, j * 0.23 + 3.7);
@@ -142,7 +145,8 @@ export function placeVegetation({
           const radius = sp.clusterRadius[0] + radiusT * (sp.clusterRadius[1] - sp.clusterRadius[0]);
           px += Math.cos(ang) * radius;
           pz += Math.sin(ang) * radius;
-          if (px * px + pz * pz > r2) continue;
+          const pD2 = px * px + pz * pz;
+          if (pD2 > r2 || pD2 < innerR2) continue;
         }
 
         const sizeRand = ((acceptNoise(i * 0.57 + c * 3.7, j * 0.61 + c * 2.9) + 1) * 0.5);
@@ -167,4 +171,24 @@ export function placeVegetation({
     species: speciesId.subarray(0, n),
     count: n
   };
+}
+
+export function mergeVegetation(...sets) {
+  const valid = sets.filter(Boolean);
+  const count = valid.reduce((sum, set) => sum + set.count, 0);
+  const positions = new Float32Array(count * 3);
+  const scales = new Float32Array(count);
+  const rotations = new Float32Array(count);
+  const species = new Uint8Array(count);
+  let pOff = 0;
+  let iOff = 0;
+  for (const set of valid) {
+    positions.set(set.positions, pOff);
+    scales.set(set.scales, iOff);
+    rotations.set(set.rotations, iOff);
+    species.set(set.species, iOff);
+    pOff += set.count * 3;
+    iOff += set.count;
+  }
+  return { positions, scales, rotations, species, count };
 }

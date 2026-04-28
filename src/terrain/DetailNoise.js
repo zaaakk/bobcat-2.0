@@ -32,9 +32,10 @@ import { createNoise2D } from 'simplex-noise';
  *   renderData  — Float32Array, post-half-float-quantisation; THIS is what
  *                 TerrainQuery samples on CPU so it matches the GPU.
  *   ridgeAmp    — metres; multiplied by the lookup to displace the surface.
- *   bedAmp      — metres; height of the bedding-pulse benches (added in
- *                 the shader from a sin of base elevation, not the texture).
+ *   bedAmp      — unitless mix [0..1]; 1 = full cliff/tread staircase, 0 =
+ *                 disabled. Drives the stepped-riser transfer in the shader.
  *   bedPeriod   — metres of vertical spacing between bedding planes.
+ *   bedRiserWidth — fraction of bedPeriod the riser occupies (rest is tread).
  *   bedWarpAmp  — metres; how much the bedding planes wander off horizontal
  *                 (sampled from the same noise field, gives natural unevenness).
  */
@@ -50,10 +51,19 @@ export function generateDetailNoise({
   octaves        = 3,
   lacunarity     = 2.0,
   gain           = 0.5,
-  ridgeAmp       = 2.1,    // metres of caprock-style ridge displacement
-  bedAmp         = 1.6,    // metres of bedding-plane bench lift
-  bedPeriod      = 20.0,   // metres between bedding planes vertically
+  ridgeAmp       = 1.5,    // metres of caprock-style ridge displacement
+  // Stepped-riser transfer: cliff/bench transfer driven by base elevation.
+  // The shader (and TerrainQuery mirror) computes
+  //   pulse = (smoothstep(0, riserWidth, frac(h/period)) - frac(h/period)) * period
+  // which, when added to the surface, turns each bedPeriod-tall slice of
+  // elevation into one tread + one near-vertical riser. bedAmp = 1.0 gives a
+  // true staircase; <1 mixes between original slope and the staircase.
+  bedAmp         = 0.62,   // unitless mix [0..1]; 1 = full staircase
+  bedPeriod      = 18.0,   // metres of vertical interval per tread+riser pair
+  bedRiserWidth  = 0.62,   // fraction of period used by the riser (0..1)
   bedWarpAmp     = 14.0,   // metres of wander on the bedding lines
+  bedSlopeLo     = 0.10,   // tan(slope angle); below this, no bedding
+  bedSlopeHi     = 0.24,   // tan(slope angle); above this, full bedding
   // ── Fine-tile layer ─────────────────────────────────────────────────
   // The broad layer is sampled across the whole world; its texture
   // resolution caps the finest visible feature at ~world/(res*0.5). At
@@ -68,9 +78,9 @@ export function generateDetailNoise({
   // them harmlessly (same texture, same world coords, both meshes see
   // the same surface so there's no seam).
   fineRes        = 256,    // texels per tile
-  fineTileSize   = 16.0,   // metres of world per tile repeat → 0.06m/texel
+  fineTileSize   = 24.0,   // metres of world per tile repeat
   fineOctaves    = 4,      // FBM octaves baked into the tile
-  fineAmp        = 0.25,   // metres peak displacement (signed)
+  fineAmp        = 0.08,   // metres peak displacement (signed)
   fineSeed       = 0.911,
   seed           = 0.137,
   // Macro-mask thresholds. Detail multiplier = smoothstep(maskLo, maskHi, ridge).
@@ -79,15 +89,12 @@ export function generateDetailNoise({
   // structure on actual ridges. Setting both to 0 disables the mask.
   maskLo         = 0.20,
   maskHi         = 0.55,
-  // Bench-specific mask. The bedding pulse is binary-ish (max(sin - 0.5, 0))
-  // so even a half-strength mask still leaves visible stairsteps. Gating the
-  // bench layer with a *stricter* mask than the ridge/fine layers keeps
-  // stairsteps confined to clearly-ridged areas; transition zones stay
-  // smooth. Tight defaults: bench only on the most ridged ~10% of the
-  // world, which reads as occasional caprock outcrops rather than universal
-  // stairsteps.
-  benchMaskLo    = 0.65,
-  benchMaskHi    = 0.85,
+  // Bench-specific mask. Broader than the original tight caprock-only mask:
+  // the slope gate now keeps benches off flats, while this wider ridge mask
+  // lets ledges run laterally across whole canyon walls instead of appearing
+  // as narrow isolated wrinkles.
+  benchMaskLo    = 0.24,
+  benchMaskHi    = 0.50,
   // Water-pool exclusion list. After the broad ridge is baked, we scale the
   // ridge value to 0 within each pool's radius (and blend smoothly out over
   // poolFadeRadius beyond) so caprock bumps don't stick up through the
@@ -265,7 +272,10 @@ export function generateDetailNoise({
     ridgeAmp,
     bedAmp,
     bedPeriod,
+    bedRiserWidth,
     bedWarpAmp,
+    bedSlopeLo,
+    bedSlopeHi,
     maskLo,
     maskHi,
     benchMaskLo,
