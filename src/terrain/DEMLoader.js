@@ -40,20 +40,65 @@ export async function loadDEM(pngUrl, jsonUrl, onProgress) {
       if (z > maxZ) maxZ = z;
     }
   }
+  // The detail patch samples this DEM at 0.29m vertex spacing — well below
+  // the 16m source resolution. Without smoothing, the patch's fine vertices
+  // resolve the DEM's piecewise-bilinear cell structure: each 16m cell is
+  // a flat bilinear patch, and the gradient changes abruptly at cell
+  // boundaries, reading as stair-step facets. A small Gaussian blur on
+  // the loaded DEM (3×3, radius=1 cell) smooths the cell-boundary gradient
+  // changes without significantly affecting features at >50m scale —
+  // which is the only scale the source data is reliable at anyway.
+  // CPU groundY (sampleHeight) and GPU heightmap texture both read this
+  // post-blur data, so the cat tracks against the rendered surface.
+  const blurred = gaussianBlur3x3(data, width, height);
+  // Recompute min/max over the smoothed data so downstream code (the
+  // height-bands fragment shader, etc.) sees the actual range.
+  let bMinZ = Infinity, bMaxZ = -Infinity;
+  for (let i = 0; i < blurred.length; i++) {
+    const z = blurred[i];
+    if (z < bMinZ) bMinZ = z;
+    if (z > bMaxZ) bMaxZ = z;
+  }
   if (onProgress) onProgress(1);
 
   return {
-    data,
+    data: blurred,
     width,
     height,
-    minZ,
-    maxZ,
+    minZ: bMinZ,
+    maxZ: bMaxZ,
     pixelSizeX: meta.pixelSizeMeters,
     pixelSizeY: meta.pixelSizeMeters,
     worldWidth: meta.worldWidthMeters,
     worldHeight: meta.worldHeightMeters,
     bbox: meta.bbox
   };
+}
+
+/**
+ * 3×3 Gaussian-ish blur (kernel 1 2 1 / 2 4 2 / 1 2 1, sum 16). Cheap,
+ * smooths cell-boundary facets without significantly softening macro
+ * features. Edges are clamped, not wrapped.
+ */
+function gaussianBlur3x3(data, w, h) {
+  const out = new Float32Array(data.length);
+  for (let j = 0; j < h; j++) {
+    const j0 = j > 0       ? j - 1 : j;
+    const j2 = j < h - 1   ? j + 1 : j;
+    const r0 = j0 * w;
+    const r1 = j  * w;
+    const r2 = j2 * w;
+    for (let i = 0; i < w; i++) {
+      const i0 = i > 0     ? i - 1 : i;
+      const i2 = i < w - 1 ? i + 1 : i;
+      out[r1 + i] = (
+        data[r0 + i0] + 2 * data[r0 + i] + data[r0 + i2] +
+        2 * data[r1 + i0] + 4 * data[r1 + i] + 2 * data[r1 + i2] +
+        data[r2 + i0] + 2 * data[r2 + i] + data[r2 + i2]
+      ) * (1 / 16);
+    }
+  }
+  return out;
 }
 
 function loadImage(src, onProgress) {
