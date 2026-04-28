@@ -9,7 +9,6 @@ import { loadGroundTextures } from '../terrain/GroundTextures.js';
 import { generateDetailNoise } from '../terrain/DetailNoise.js';
 
 import { buildSpriteAtlas } from '../vegetation/SpriteAtlas.js';
-import { mergeVegetation, placeVegetation } from '../vegetation/PlacementEngine.js';
 import { createInstancedPlants } from '../vegetation/InstancedPlants.js';
 import { SPECIES } from '../vegetation/species.js';
 
@@ -88,7 +87,8 @@ export class World {
     // (Step 4) Detail noise, suppressed where the pools sit.
     this._onProgress(0.42, 'Painting ground…');
     const heightTex = heightmapTexture(THREE, this.dem);
-    const splatTex = generateSplatMap(this.dem, 1280);
+    const splatPair = generateSplatMap(this.dem, 1280);
+    this.splat = splatPair;
     const ground = await loadGroundTextures(this.renderer);
 
     this.detailNoise = generateDetailNoise({
@@ -103,7 +103,7 @@ export class World {
     // (Step 6) Terrain meshes.
     this._onProgress(0.55, 'Building terrain mesh…');
     this.terrain = createTerrainMesh({
-      dem: this.dem, heightTex, splatTex,
+      dem: this.dem, heightTex, splatTex: splatPair,
       groundTextures: ground.diffuse,
       groundNormals:  ground.normals,
       normalTex: ground.defaultNormal,
@@ -149,36 +149,19 @@ export class World {
     this._onProgress(0.65, 'Loading flora…');
     const atlas = await buildSpriteAtlas(SPECIES, 512);
 
-    this._onProgress(0.75, 'Placing vegetation…');
-    const innerPlants = placeVegetation({
-      dem: this.dem,
-      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
-      cellSize: 4.0,
-      globalDensity: 2.0,
-      playRadius: 3500,
-      maxInstances: 1_000_000,
-    });
-    const outerPlants = placeVegetation({
-      dem: this.dem,
-      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
-      cellSize: 12.0,
-      globalDensity: 1.35,
-      innerRadius: 3300,
-      playRadius: Math.hypot(this.dem.worldWidth, this.dem.worldHeight) * 0.5,
-      maxInstances: 450_000,
-    });
-    const instances = mergeVegetation(innerPlants, outerPlants);
-    console.log(`placed ${instances.count} plant instances (${innerPlants.count} inner, ${outerPlants.count} outer)`);
-
-    this.plants = createInstancedPlants({ atlas, instances, dem: this.dem });
-    for (const tier of this.plants.tiers) this.scene.add(tier.mesh);
-
+    this._onProgress(0.75, 'Preparing flora…');
     this.shadows = createGroundShadows({
       scene: this.scene,
-      instances,
       groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z)
     });
-    console.log(`plant shadows: ${this.shadows.count} instances`);
+    this.plants = createInstancedPlants({
+      atlas,
+      dem: this.dem,
+      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
+      shadows: this.shadows
+    });
+    for (const tier of this.plants.tiers) this.scene.add(tier.mesh);
+    console.log('vegetation streaming enabled');
   }
 
   /** World-coordinate ground sampler — what character physics should grab. */

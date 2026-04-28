@@ -13,13 +13,20 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, segments, segments);
   geometry.rotateX(-Math.PI / 2);
 
+  const splatA = splatTex.splatA || splatTex;
+  const splatB = splatTex.splatB || null;
   const uniforms = {
     uHeightmap: { value: heightTex },
-    uSplat: { value: splatTex },
-    uTexRock: { value: groundTextures.rock },
-    uTexGrass: { value: groundTextures.grass },
+    uSplat:  { value: splatA },
+    uSplatB: { value: splatB || splatA }, // fallback so sampler always binds
+    uHasSplatB: { value: splatB ? 1.0 : 0.0 },
+    uTexRock:   { value: groundTextures.rock },
+    uTexGrass:  { value: groundTextures.grass },
     uTexGravel: { value: groundTextures.gravel },
-    uTexSand: { value: groundTextures.sand },
+    uTexSand:   { value: groundTextures.sand },
+    uTexRipBed: { value: groundTextures.riparianbed || groundTextures.sand },
+    uTexRockyZ: { value: groundTextures.rockyZone   || groundTextures.rock },
+    uTexSandyW: { value: groundTextures.sandyWash   || groundTextures.sand },
     // Per-tile normal maps (sliced from each [tex]normals.png 2×2 atlas).
     // These replace the single generic detail-normal in the splat blend, so
     // each ground type's surface micro-detail follows its own diffuse pattern.
@@ -27,14 +34,18 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uNormalGrass:  { value: groundNormals?.grass  || normalTex },
     uNormalGravel: { value: groundNormals?.gravel || normalTex },
     uNormalSand:   { value: groundNormals?.sand   || normalTex },
+    uNormalRipBed: { value: groundNormals?.riparianbed || normalTex },
+    uNormalRockyZ: { value: groundNormals?.rockyZone   || normalTex },
+    uNormalSandyW: { value: groundNormals?.sandyWash   || normalTex },
     uMinZ: { value: dem.minZ },
     uMaxZ: { value: dem.maxZ },
     uDemSize: { value: new THREE.Vector2(dem.worldWidth, dem.worldHeight) },
     uDemTexel: { value: new THREE.Vector2(1 / dem.width, 1 / dem.height) },
     uPlaneSize: { value: new THREE.Vector2(planeWidth, planeHeight) },
     uMeshSpacing: { value: new THREE.Vector2(planeWidth / segments, planeHeight / segments) },
-    uTextureScale: { value: 24.0 }, // metres per texture repeat
+    uTextureScale: { value: 51.5 }, // metres per texture repeat
     uSplatScale: { value: 1.0 },
+    uSplatBias: { value: 3.3 },     // pow() applied to splat weights — higher = chunkier
     uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
     uSunColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
     uAmbientColor: { value: new THREE.Color(0.42, 0.45, 0.55) },
@@ -312,14 +323,23 @@ export const TERRAIN_VERT = /* glsl */`
 export const TERRAIN_FRAG = /* glsl */`
   precision highp float;
   uniform sampler2D uSplat;
+  uniform sampler2D uSplatB;
+  uniform float uHasSplatB;
+  uniform float uSplatBias;
   uniform sampler2D uTexRock;
   uniform sampler2D uTexGrass;
   uniform sampler2D uTexGravel;
   uniform sampler2D uTexSand;
+  uniform sampler2D uTexRipBed;
+  uniform sampler2D uTexRockyZ;
+  uniform sampler2D uTexSandyW;
   uniform sampler2D uNormalRock;
   uniform sampler2D uNormalGrass;
   uniform sampler2D uNormalGravel;
   uniform sampler2D uNormalSand;
+  uniform sampler2D uNormalRipBed;
+  uniform sampler2D uNormalRockyZ;
+  uniform sampler2D uNormalSandyW;
   uniform float uTextureScale;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
@@ -386,6 +406,9 @@ export const TERRAIN_FRAG = /* glsl */`
     vec3 cGrass  = mix(texture2D(uTexGrass,  tileUv).rgb, texture2D(uTexGrass,  tileUvFar).rgb, farBlend);
     vec3 cGravel = mix(texture2D(uTexGravel, tileUv).rgb, texture2D(uTexGravel, tileUvFar).rgb, farBlend);
     vec3 cSand   = mix(texture2D(uTexSand,   tileUv).rgb, texture2D(uTexSand,   tileUvFar).rgb, farBlend);
+    vec3 cRipBed = mix(texture2D(uTexRipBed, tileUv).rgb, texture2D(uTexRipBed, tileUvFar).rgb, farBlend);
+    vec3 cRockyZ = mix(texture2D(uTexRockyZ, tileUv).rgb, texture2D(uTexRockyZ, tileUvFar).rgb, farBlend);
+    vec3 cSandyW = mix(texture2D(uTexSandyW, tileUv).rgb, texture2D(uTexSandyW, tileUvFar).rgb, farBlend);
 
     // Sharpen each tile's contrast — pushes "small rocks, light/dark breakup"
     // visible in the source PNGs into the rendered surface.
@@ -393,15 +416,25 @@ export const TERRAIN_FRAG = /* glsl */`
     cGrass  = clamp((cGrass  - 0.5) * 1.18 + 0.5, 0.0, 1.0);
     cGravel = clamp((cGravel - 0.5) * 1.28 + 0.5, 0.0, 1.0);
     cSand   = clamp((cSand   - 0.5) * 1.10 + 0.5, 0.0, 1.0);
+    cRipBed = clamp((cRipBed - 0.5) * 1.30 + 0.5, 0.0, 1.0);
+    cRockyZ = clamp((cRockyZ - 0.5) * 1.28 + 0.5, 0.0, 1.0);
+    cSandyW = clamp((cSandyW - 0.5) * 1.18 + 0.5, 0.0, 1.0);
 
     // Chunky splat: bias each weight toward 0 or 1 so transitions between
     // ground types read as crisp boundaries instead of soft watercolor mixes.
-    vec4 splat = texture2D(uSplat, vDemUv);
-    splat = mix(splat, vec4(0.05, 0.0, 0.7, 0.25), vEdgeFade);
-    splat = pow(splat, vec4(1.6));
-    splat /= max(splat.r + splat.g + splat.b + splat.a, 1e-3);
+    vec4 splat  = texture2D(uSplat,  vDemUv);
+    vec4 splatB = uHasSplatB > 0.5 ? texture2D(uSplatB, vDemUv) : vec4(0.0);
+    splat  = mix(splat,  vec4(0.05, 0.0, 0.7, 0.25), vEdgeFade);
+    splatB = mix(splatB, vec4(0.0), vEdgeFade);
+    splat  = pow(splat,  vec4(uSplatBias));
+    splatB = pow(splatB, vec4(uSplatBias));
+    float splatTotal = max(splat.r + splat.g + splat.b + splat.a + splatB.r + splatB.g + splatB.b, 1e-3);
+    splat  /= splatTotal;
+    splatB /= splatTotal;
 
-    vec3 albedo = cRock * splat.r + cGrass * splat.g + cGravel * splat.b + cSand * splat.a;
+    vec3 albedo =
+        cRock   * splat.r + cGrass   * splat.g + cGravel  * splat.b + cSand    * splat.a
+      + cRipBed * splatB.r + cRockyZ * splatB.g + cSandyW * splatB.b;
 
     // Per-tile normal maps. Sample each one in tangent space, splat-blend by
     // material weights, then transform the result through the TBN basis into
@@ -413,7 +446,12 @@ export const TERRAIN_FRAG = /* glsl */`
     vec3 nGrass  = texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0;
     vec3 nGravel = texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0;
     vec3 nSand   = texture2D(uNormalSand,   tileUv).rgb * 2.0 - 1.0;
-    vec3 nTangent = nRock * splat.r + nGrass * splat.g + nGravel * splat.b + nSand * splat.a;
+    vec3 nRipBed = texture2D(uNormalRipBed, tileUv).rgb * 2.0 - 1.0;
+    vec3 nRockyZ = texture2D(uNormalRockyZ, tileUv).rgb * 2.0 - 1.0;
+    vec3 nSandyW = texture2D(uNormalSandyW, tileUv).rgb * 2.0 - 1.0;
+    vec3 nTangent =
+        nRock   * splat.r + nGrass   * splat.g + nGravel  * splat.b + nSand    * splat.a
+      + nRipBed * splatB.r + nRockyZ * splatB.g + nSandyW * splatB.b;
     // Boost the horizontal (R/G) deviation so the bumps actually read; leave
     // Z (out-of-surface, the B channel) alone.
     nTangent.xy *= 1.5;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SPECIES } from './species.js';
+import { generateVegetationChunk } from './PlacementEngine.js';
 
 /**
  * Three LOD tiers, all world-oriented (no per-frame camera billboarding):
@@ -11,10 +12,21 @@ import { SPECIES } from './species.js';
  * atlas tile via the per-instance aSpecies attribute. Distance-based alpha at
  * tier boundaries hides LOD pops.
  */
-export function createInstancedPlants({ atlas, instances, dem }) {
+export function createInstancedPlants({ atlas, instances = null, dem, groundY = null, shadows = null }) {
   const tiers = [];
   const chunkSize = 512;
-  const chunks = buildPlantChunks(instances, chunkSize);
+  const streaming = !instances;
+  const activeChunks = new Map();
+  const queued = new Map();
+  const generationQueue = [];
+  const streamCfg = {
+    denseRadius: 3200,
+    farRadius: 6500,
+    unloadRadius: 7200,
+    maxGeneratePerFrame: 3,
+    dense: { cellSize: 4.0, globalDensity: 2.2, maxPerChunk: 14000 },
+    far: { cellSize: 14.0, globalDensity: 1.45, maxPerChunk: 4200 }
+  };
 
   // Build atlas-rect lookup as a Vec4 array uniform: [uOffset, vOffset, uScale, vScale].
   // Pad to MAX_SPECIES so the shader can use a fixed-size array uniform.
@@ -74,9 +86,9 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     {
       geometry: makeQuadGeometry,
       tierMin: 380,
-      tierMax: 2800,
+      tierMax: 6500,
       fadeIn: 60,
-      fadeOut: 200,
+      fadeOut: 500,
     }
   ];
 
@@ -99,20 +111,13 @@ export function createInstancedPlants({ atlas, instances, dem }) {
 
     const group = new THREE.Group();
     group.frustumCulled = false;
-    const meshes = [];
-    for (const chunk of chunks) {
-      const geo = cfg.geometry();
-      attachInstancedAttribs(geo, chunk.attribs);
-      geo.instanceCount = chunk.count;
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 1;
-      mesh.userData.plantChunk = chunk;
-      group.add(mesh);
-      meshes.push(mesh);
-    }
+    tiers.push({ mesh: group, material: mat, uniforms, meshes: new Map(), config: cfg });
+  }
 
-    tiers.push({ mesh: group, material: mat, uniforms, meshes, config: cfg });
+  if (instances) {
+    for (const chunk of buildPlantChunks(instances, chunkSize)) {
+      addChunkInstances(chunk.key, chunk.instances, 'dense');
+    }
   }
 
   const projScreen = new THREE.Matrix4();
@@ -120,6 +125,7 @@ export function createInstancedPlants({ atlas, instances, dem }) {
   const sphere = new THREE.Sphere();
 
   function update(time, cameraPos, camera) {
+    if (streaming) updateStreaming(cameraPos);
     if (camera) {
       projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projScreen);
@@ -129,7 +135,7 @@ export function createInstancedPlants({ atlas, instances, dem }) {
       const minD = Math.max(0, t.config.tierMin - t.config.fadeIn);
       const maxD = t.config.tierMax + t.config.fadeOut;
       let visibleCount = 0;
-      for (const mesh of t.meshes) {
+      for (const mesh of t.meshes.values()) {
         const chunk = mesh.userData.plantChunk;
         const dx = cameraPos.x - chunk.center.x;
         const dz = cameraPos.z - chunk.center.z;
@@ -147,7 +153,161 @@ export function createInstancedPlants({ atlas, instances, dem }) {
     }
   }
 
-  return { tiers, update, count: instances.count, chunkCount: chunks.length };
+  function updateStreaming(cameraPos) {
+    const desired = desiredChunks(cameraPos);
+    const desiredKeys = new Set(desired.map(d => d.key));
+
+    for (const [key, record] of activeChunks) {
+      if (desiredKeys.has(key)) continue;
+      const dx = cameraPos.x - record.center.x;
+      const dz = cameraPos.z - record.center.z;
+      if (Math.hypot(dx, dz) > streamCfg.unloadRadius) removeChunk(key);
+    }
+
+    for (const d of desired) {
+      const existing = activeChunks.get(d.key);
+      if (existing) {
+        if (existing.mode === d.mode) continue;
+        if (existing.mode === 'dense' && d.mode === 'far' && d.dist < streamCfg.denseRadius + chunkSize) continue;
+      }
+      if (queued.has(d.key) && queued.get(d.key) === d.mode) continue;
+      queued.set(d.key, d.mode);
+      generationQueue.push(d);
+    }
+
+    generationQueue.sort((a, b) => a.dist - b.dist);
+    let made = 0;
+    while (made < streamCfg.maxGeneratePerFrame && generationQueue.length) {
+      const d = generationQueue.shift();
+      if (queued.get(d.key) !== d.mode) continue;
+      queued.delete(d.key);
+      if (generateDesiredChunk(d)) made++;
+    }
+  }
+
+  function generateDesiredChunk(d) {
+    const existing = activeChunks.get(d.key);
+    if (existing && (existing.mode === 'dense' || existing.mode === d.mode)) return false;
+    const cfg = streamCfg[d.mode];
+    const chunkInstances = generateVegetationChunk({
+      dem,
+      groundY,
+      chunkX: d.cx,
+      chunkZ: d.cz,
+      chunkSize,
+      cellSize: cfg.cellSize,
+      globalDensity: cfg.globalDensity,
+      maxPerChunk: cfg.maxPerChunk
+    });
+    addChunkInstances(d.key, chunkInstances, d.mode);
+    return true;
+  }
+
+  async function prewarm(cameraPos, onProgress = () => {}) {
+    if (!streaming) return;
+    const desired = desiredChunks(cameraPos);
+    let done = 0;
+    const total = desired.length || 1;
+    for (const d of desired) {
+      queued.delete(d.key);
+      generateDesiredChunk(d);
+      done++;
+      if (done % 4 === 0) {
+        onProgress(done / total);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+    onProgress(1);
+  }
+
+  function desiredChunks(cameraPos) {
+    const out = [];
+    const cx0 = Math.floor(cameraPos.x / chunkSize);
+    const cz0 = Math.floor(cameraPos.z / chunkSize);
+    const rChunks = Math.ceil(streamCfg.farRadius / chunkSize);
+    const halfW = dem.worldWidth * 0.5;
+    const halfH = dem.worldHeight * 0.5;
+    for (let dz = -rChunks; dz <= rChunks; dz++) {
+      for (let dx = -rChunks; dx <= rChunks; dx++) {
+        const cx = cx0 + dx;
+        const cz = cz0 + dz;
+        const minX = cx * chunkSize;
+        const minZ = cz * chunkSize;
+        const maxX = minX + chunkSize;
+        const maxZ = minZ + chunkSize;
+        if (maxX < -halfW || minX > halfW || maxZ < -halfH || minZ > halfH) continue;
+        const centerX = minX + chunkSize * 0.5;
+        const centerZ = minZ + chunkSize * 0.5;
+        const dist = Math.hypot(cameraPos.x - centerX, cameraPos.z - centerZ);
+        if (dist > streamCfg.farRadius) continue;
+        out.push({
+          key: `${cx},${cz}`,
+          cx,
+          cz,
+          dist,
+          mode: dist <= streamCfg.denseRadius ? 'dense' : 'far'
+        });
+      }
+    }
+    out.sort((a, b) => a.dist - b.dist);
+    return out;
+  }
+
+  function addChunkInstances(key, chunkInstances, mode) {
+    removeChunk(key);
+    const chunk = makeChunkFromInstances(key, chunkInstances, chunkSize);
+    const record = {
+      key,
+      mode,
+      count: chunk.count,
+      center: chunk.center,
+      meshes: []
+    };
+    activeChunks.set(key, record);
+    if (chunk.count <= 0) return;
+
+    const tierIndices = mode === 'far' ? [2] : [0, 1, 2];
+    for (const tierIndex of tierIndices) {
+      const t = tiers[tierIndex];
+      const geo = t.config.geometry();
+      attachInstancedAttribs(geo, chunk.attribs);
+      geo.instanceCount = chunk.count;
+      const mesh = new THREE.Mesh(geo, t.material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 1;
+      mesh.userData.plantChunk = chunk;
+      t.mesh.add(mesh);
+      t.meshes.set(key, mesh);
+      record.meshes.push({ tierIndex, mesh });
+    }
+    if (shadows && mode === 'dense') shadows.addPlantChunk(key, chunkInstances, mode);
+  }
+
+  function removeChunk(key) {
+    const record = activeChunks.get(key);
+    if (!record) return;
+    for (const { tierIndex, mesh } of record.meshes) {
+      const t = tiers[tierIndex];
+      t.mesh.remove(mesh);
+      t.meshes.delete(key);
+      mesh.geometry.dispose();
+    }
+    if (shadows) shadows.removePlantChunk(key);
+    activeChunks.delete(key);
+  }
+
+  return {
+    tiers,
+    update,
+    get count() {
+      let n = 0;
+      for (const c of activeChunks.values()) n += c.count;
+      return n;
+    },
+    get chunkCount() { return activeChunks.size; },
+    streamCfg,
+    prewarm
+  };
 }
 
 function buildPlantChunks(instances, chunkSize) {
@@ -215,20 +375,67 @@ function buildPlantChunks(instances, chunkSize) {
     const hz = (chunk.maxZ - chunk.minZ) * 0.5;
     chunk.radiusXZ = Math.hypot(hx, hz);
     chunk.radius = Math.hypot(chunk.radiusXZ, hy);
-    chunk.attribs = {
-      aOffset: new THREE.InstancedBufferAttribute(chunk.positions, 3),
-      aScale: new THREE.InstancedBufferAttribute(chunk.scales, 1),
-      aRotation: new THREE.InstancedBufferAttribute(chunk.rotations, 1),
-      aSpecies: new THREE.InstancedBufferAttribute(chunk.species, 1)
+    chunk.instances = {
+      key: chunk.key,
+      chunkX: chunk.cx,
+      chunkZ: chunk.cz,
+      positions: chunk.positions,
+      scales: chunk.scales,
+      rotations: chunk.rotations,
+      species: chunk.species,
+      count: chunk.count
     };
-    delete chunk.positions;
-    delete chunk.scales;
-    delete chunk.rotations;
-    delete chunk.species;
     delete chunk.write;
   }
 
   return chunks;
+}
+
+function makeChunkFromInstances(key, instances, chunkSize) {
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < instances.count; i++) {
+    const x = instances.positions[i * 3 + 0];
+    const y = instances.positions[i * 3 + 1];
+    const z = instances.positions[i * 3 + 2];
+    const scale = instances.scales[i];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y + scale);
+    minZ = Math.min(minZ, z);
+    maxZ = Math.max(maxZ, z);
+  }
+  if (instances.count === 0) {
+    const [cx, cz] = key.split(',').map(Number);
+    minX = cx * chunkSize;
+    maxX = minX + chunkSize;
+    minZ = cz * chunkSize;
+    maxZ = minZ + chunkSize;
+    minY = maxY = 0;
+  }
+  const center = new THREE.Vector3(
+    (minX + maxX) * 0.5,
+    (minY + maxY) * 0.5,
+    (minZ + maxZ) * 0.5
+  );
+  const hx = (maxX - minX) * 0.5;
+  const hy = (maxY - minY) * 0.5;
+  const hz = (maxZ - minZ) * 0.5;
+  return {
+    key,
+    count: instances.count,
+    center,
+    radiusXZ: Math.hypot(hx, hz),
+    radius: Math.hypot(Math.hypot(hx, hz), hy),
+    attribs: {
+      aOffset: new THREE.InstancedBufferAttribute(instances.positions, 3),
+      aScale: new THREE.InstancedBufferAttribute(instances.scales, 1),
+      aRotation: new THREE.InstancedBufferAttribute(instances.rotations, 1),
+      aSpecies: new THREE.InstancedBufferAttribute(new Float32Array(instances.species), 1)
+    }
+  };
 }
 
 function attachInstancedAttribs(geo, attribs) {

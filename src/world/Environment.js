@@ -135,6 +135,7 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     terrain.uniforms.uFogColorMid.value.copy(state.fogMid);
     terrain.uniforms.uFogColorFar.value.copy(state.fogFar);
     terrain.uniforms.uFogDensity.value = THREE.MathUtils.lerp(0.00008, 0.00018, dayT) + twilightBand * 0.00003;
+    state.fogDensity = terrain.uniforms.uFogDensity.value;
 
     for (const tier of world.plants.tiers) {
       tier.uniforms.uSunDir.value.copy(state.sunDir);

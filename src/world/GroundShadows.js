@@ -11,8 +11,8 @@ const SHADOW_CFG = {
   },
   plants: {
     chunkSize: 512,
-    maxDistance: 900,
-    yOffset: 0.03,
+    maxDistance: 3200,
+    yOffset: 0.09,
     minHeight: 0.85,
     opacity: 0.74,
     speciesIds: new Set([0, 1, 2, 3, 5, 6, 8])
@@ -79,6 +79,8 @@ export function createGroundShadows({ scene, instances, groundY }) {
   return {
     updateCat,
     updatePlants,
+    addPlantChunk: plants.addChunk,
+    removePlantChunk: plants.removeChunk,
     setEnabled,
     setCatEnabled,
     setPlantEnabled,
@@ -88,15 +90,15 @@ export function createGroundShadows({ scene, instances, groundY }) {
     get visiblePlantChunks() { return plants.visibleChunks || 0; },
     get visiblePlantInstances() { return plants.visibleInstances || 0; },
     settings,
-    count: plants.count
+    get count() { return plants.count || 0; }
   };
 }
 
 function createCatShadow(settings) {
   const geometry = makeShadowQuadGeometry(false);
-  const uniforms = {
+  const uniforms = makeShadowUniforms({
     uOpacity: { value: settings.catOpacity }
-  };
+  });
   const material = new THREE.ShaderMaterial({
     uniforms,
     transparent: true,
@@ -121,20 +123,18 @@ function createCatShadow(settings) {
     mesh.quaternion.copy(bobcat.pivot.quaternion);
     mesh.scale.set(settings.catWidth, 1, settings.catLength);
     uniforms.uOpacity.value = settings.catOpacity * shadowDayStrength(envState);
+    pushFogUniforms(uniforms, envState);
   }
 
   return { mesh, update };
 }
 
 function createPlantShadows(instances, settings, groundY) {
-  const chunks = buildPlantShadowChunks(instances, SHADOW_CFG.plants.chunkSize, groundY);
-  if (!chunks.length) return { group: null, update: () => {}, count: 0 };
-
-  const uniforms = {
+  const uniforms = makeShadowUniforms({
     uOpacity: { value: settings.plantOpacity },
     uYOffset: { value: settings.plantOffset },
     uScale: { value: settings.plantScale }
-  };
+  });
   const material = new THREE.ShaderMaterial({
     uniforms,
     transparent: true,
@@ -148,9 +148,14 @@ function createPlantShadows(instances, settings, groundY) {
   });
   const group = new THREE.Group();
   group.frustumCulled = false;
+  const meshes = new Map();
+  let totalCount = 0;
 
-  const meshes = [];
-  for (const chunk of chunks) {
+  function addChunk(key, chunkInstances) {
+    removeChunk(key);
+    const chunks = buildPlantShadowChunks(chunkInstances, SHADOW_CFG.plants.chunkSize, groundY);
+    let added = 0;
+    for (const chunk of chunks) {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3));
     geometry.setAttribute('uv', new THREE.BufferAttribute(chunk.uvs, 2));
@@ -161,7 +166,20 @@ function createPlantShadows(instances, settings, groundY) {
     mesh.renderOrder = 1;
     mesh.userData.shadowChunk = chunk;
     group.add(mesh);
-    meshes.push(mesh);
+      meshes.set(`${key}:${chunk.key || added}`, mesh);
+      added += chunk.count;
+    }
+    totalCount += added;
+  }
+
+  function removeChunk(key) {
+    for (const [meshKey, mesh] of meshes) {
+      if (!meshKey.startsWith(`${key}:`)) continue;
+      totalCount -= mesh.userData.shadowChunk.count;
+      group.remove(mesh);
+      mesh.geometry.dispose();
+      meshes.delete(meshKey);
+    }
   }
 
   const projScreen = new THREE.Matrix4();
@@ -172,13 +190,14 @@ function createPlantShadows(instances, settings, groundY) {
     uniforms.uOpacity.value = settings.plantOpacity * shadowDayStrength(envState);
     uniforms.uYOffset.value = settings.plantOffset;
     uniforms.uScale.value = settings.plantScale;
+    pushFogUniforms(uniforms, envState);
     if (camera) {
       projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       frustum.setFromProjectionMatrix(projScreen);
     }
     let visibleChunks = 0;
     let visibleInstances = 0;
-    for (const mesh of meshes) {
+    for (const mesh of meshes.values()) {
       const chunk = mesh.userData.shadowChunk;
       const dx = cameraPosition.x - chunk.center.x;
       const dz = cameraPosition.z - chunk.center.z;
@@ -201,10 +220,13 @@ function createPlantShadows(instances, settings, groundY) {
   const api = {
     group,
     update,
-    count: chunks.reduce((sum, c) => sum + c.count, 0),
+    addChunk,
+    removeChunk,
+    get count() { return totalCount; },
     visibleChunks: 0,
     visibleInstances: 0
   };
+  if (instances) addChunk('static', instances);
   return api;
 }
 
@@ -224,6 +246,7 @@ function buildPlantShadowChunks(instances, chunkSize, groundY) {
     let chunk = meta.get(key);
     if (!chunk) {
       chunk = {
+        key,
         count: 0,
         items: [],
         minX: Infinity, maxX: -Infinity,
@@ -353,10 +376,13 @@ function shadowDayStrength(envState) {
 
 const SHADOW_VERT = /* glsl */`
   varying vec2 vUv;
+  varying vec3 vWorldPos;
 
   void main() {
     vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `;
 
@@ -365,12 +391,14 @@ const PLANT_SHADOW_VERT = /* glsl */`
   uniform float uYOffset;
   uniform float uScale;
   varying vec2 vUv;
+  varying vec3 vWorldPos;
 
   void main() {
     vec3 p = position;
     p.xz = aCenter.xz + (p.xz - aCenter.xz) * uScale;
     p.y += uYOffset;
     vUv = uv;
+    vWorldPos = p;
     gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
   }
 `;
@@ -378,15 +406,42 @@ const PLANT_SHADOW_VERT = /* glsl */`
 const SHADOW_FRAG = /* glsl */`
   precision mediump float;
   uniform float uOpacity;
+  uniform float uFogDensity;
+  uniform vec3 uFogColorFar;
   varying vec2 vUv;
+  varying vec3 vWorldPos;
 
   void main() {
     vec2 p = vUv * 2.0 - 1.0;
     float r2 = dot(p, p);
-    float alpha = (1.0 - smoothstep(0.20, 1.0, r2)) * uOpacity;
+    vec3 viewRay = normalize(vWorldPos - cameraPosition);
+    float dist = length(cameraPosition - vWorldPos);
+    float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
+    float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
+    float densityBoost = 1.0 + horizon * 1.35 + lowAir * 0.45;
+    float fog = 1.0 - exp(-dist * uFogDensity * densityBoost);
+    fog = smoothstep(0.0, 1.0, clamp(fog, 0.0, 1.0));
+    float horizonTakeover = smoothstep(0.85, 1.0, fog);
+    fog = mix(fog, 1.0, horizonTakeover);
+    float alpha = (1.0 - smoothstep(0.20, 1.0, r2)) * uOpacity * (1.0 - fog);
     if (alpha < 0.01) discard;
-    gl_FragColor = vec4(0.025, 0.020, 0.014, alpha);
+    vec3 shadowCol = mix(vec3(0.025, 0.020, 0.014), uFogColorFar, fog * 0.35);
+    gl_FragColor = vec4(shadowCol, alpha);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
 `;
+
+function makeShadowUniforms(extra) {
+  return {
+    ...extra,
+    uFogDensity: { value: 0.00017 },
+    uFogColorFar: { value: new THREE.Color('#668db8') }
+  };
+}
+
+function pushFogUniforms(uniforms, envState) {
+  if (!envState) return;
+  if (envState.fogFar) uniforms.uFogColorFar.value.copy(envState.fogFar);
+  if (typeof envState.fogDensity === 'number') uniforms.uFogDensity.value = envState.fogDensity;
+}

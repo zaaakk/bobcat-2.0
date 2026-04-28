@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /**
- * Loads the ground-texture set used by TerrainMesh: 4 diffuse maps + 4 tile-
+ * Loads the ground-texture set used by TerrainMesh: 7 diffuse maps + 7 tile-
  * specific normal maps (sliced from each material's 2x2 atlas), plus the
  * legacy `normal.png` (still used as a default).
  *
@@ -12,8 +12,8 @@ import * as THREE from 'three';
  *   BR (1,1)  ORM (RGB PBR)  — reserved for roughness/metalness pass
  *
  * Returns:
- *   { diffuse: { rock, grass, gravel, sand },
- *     normals: { rock, grass, gravel, sand },
+ *   { diffuse: { rock, grass, gravel, sand, riparianbed, rockyZone, sandyWash },
+ *     normals: { rock, grass, gravel, sand, riparianbed, rockyZone, sandyWash },
  *     defaultNormal }
  */
 export async function loadGroundTextures(renderer) {
@@ -58,22 +58,34 @@ export async function loadGroundTextures(renderer) {
     img.src = url;
   });
 
-  const [tRock, tGrass, tGravel, tSand, tDefaultNormal,
-         nRock, nGrass, nGravel, nSand] = await Promise.all([
+  const [tRock, tGrass, tGravel, tSand, tRipBed, tRockyZ, tSandyW, tDefaultNormal,
+         nRock, nGrass, nGravel, nSand, nRipBed, nRockyZ, nSandyW] = await Promise.all([
     loadDiffuse('/assets/ground/rock.png'),
     loadDiffuse('/assets/ground/grassdry.png'),
     loadDiffuse('/assets/ground/gravel.png'),
     loadDiffuse('/assets/ground/sand.png'),
+    loadDiffuse('/assets/ground/riparianbed.png'),
+    loadDiffuse('/assets/ground/rocky-zone.png'),
+    loadDiffuse('/assets/ground/sandywash.png'),
     loadDiffuse('/assets/ground/normal.png'),
     loadAtlasCell('/assets/ground/rocknormals.png', 1, 0),
     loadAtlasCell('/assets/ground/grassdrynormals.png', 1, 0),
     loadAtlasCell('/assets/ground/gravelnormals.png', 1, 0),
     loadAtlasCell('/assets/ground/sandnormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/riparianbednormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/rockynormals.png', 1, 0),
+    loadAtlasCell('/assets/ground/sandywashnormals.png', 1, 0),
   ]);
 
   return {
-    diffuse: { rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand },
-    normals: { rock: nRock, grass: nGrass, gravel: nGravel, sand: nSand },
+    diffuse: {
+      rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand,
+      riparianbed: tRipBed, rockyZone: tRockyZ, sandyWash: tSandyW,
+    },
+    normals: {
+      rock: nRock, grass: nGrass, gravel: nGravel, sand: nSand,
+      riparianbed: nRipBed, rockyZone: nRockyZ, sandyWash: nSandyW,
+    },
     defaultNormal: tDefaultNormal
   };
 }

@@ -72,6 +72,13 @@ async function main() {
   bobcat.pivot.rotation.y = spawn.yaw;
   scene.add(bobcat.object);
 
+  if (!sp.has('noplants') && world.plants.prewarm) {
+    setLoadingProgress(0.985, 'Growing brush…');
+    await world.plants.prewarm(bobcat.position, t => {
+      setLoadingProgress(0.985 + t * 0.012, 'Growing brush…');
+    });
+  }
+
   bobcat.setGroundFn((x, z) => world.groundY(x, z));
   const cam = createThirdPersonCamera({
     camera, target: bobcat,
@@ -398,6 +405,56 @@ async function main() {
           // GPU draws — the bobcat's grounding stays at the original ~5m
           // peak. That's intentional: visual exploration without making
           // the cat float/sink.
+        }
+      },
+      {
+        id: 'ground', label: 'Ground',
+        render(el) {
+          const u = world.terrain.uniforms;
+          const splat = world.splat;
+          panelRow(el, {
+            label: 'Tile size (m)', min: 4, max: 80, step: 0.5,
+            value: u.uTextureScale.value,
+            onInput: v => u.uTextureScale.value = v
+          });
+          panelRow(el, {
+            label: 'Splat bias', min: 0.4, max: 4.0, step: 0.05,
+            value: u.uSplatBias.value,
+            onInput: v => u.uSplatBias.value = v
+          });
+          if (splat) {
+            const p = splat.params;
+            const slider = (label, key, min, max, step) => panelRow(el, {
+              label, min, max, step, value: p[key],
+              onInput: v => splat.regenerate({ [key]: v })
+            });
+            slider('Patchiness',      'patchiness',   0, 8, 0.05);
+            slider('Rock weight',     'rockScale',    0, 8, 0.05);
+            slider('Grass weight',    'grassScale',   0, 8, 0.05);
+            slider('Gravel weight',   'gravelScale',  0, 8, 0.05);
+            slider('Sand weight',     'sandScale',    0, 8, 0.05);
+            slider('Riparianbed wt',  'ripBedScale',  0, 8, 0.05);
+            slider('Rocky-zone wt',   'rockyZScale',  0, 8, 0.05);
+            slider('Sandywash wt',    'sandyWScale',  0, 8, 0.05);
+            slider('Grass macro',     'grassMacroFreq',  0.5, 30, 0.1);
+            slider('Gravel macro',    'gravelMacroFreq', 0.5, 30, 0.1);
+            slider('Sand macro',      'sandMacroFreq',   0.5, 30, 0.1);
+            slider('Riparianbed macro','ripBedMacroFreq',0.5, 30, 0.1);
+            slider('Rocky macro',     'rockyMacroFreq',  0.5, 30, 0.1);
+            slider('Wash macro',      'washMacroFreq',   0.5, 30, 0.1);
+            panelButton(el, 'Reset', () => {
+              splat.regenerate({
+                rockScale: 4.20, grassScale: 0.75, gravelScale: 3.35, sandScale: 2.00,
+                ripBedScale: 3.05, rockyZScale: 3.00, sandyWScale: 3.00,
+                grassMacroFreq: 8.0, gravelMacroFreq: 7.0, sandMacroFreq: 6.5,
+                ripBedMacroFreq: 23.8, rockyMacroFreq: 22.2, washMacroFreq: 20.3,
+                patchiness: 4.0,
+              });
+              u.uTextureScale.value = 51.5;
+              u.uSplatBias.value = 3.3;
+              el.parentElement.querySelector('.dbg-tab.active').click();
+            });
+          }
         }
       }
     ]
