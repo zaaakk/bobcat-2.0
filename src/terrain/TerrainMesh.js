@@ -44,6 +44,10 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uPlaneSize: { value: new THREE.Vector2(planeWidth, planeHeight) },
     uMeshSpacing: { value: new THREE.Vector2(planeWidth / segments, planeHeight / segments) },
     uTextureScale: { value: 51.5 }, // metres per texture repeat
+    uTextureQuality: { value: 2.0 }, // 0=flat splat, 1=single-scale, 2=dual-scale
+    uTerrainNormals: { value: 1.0 },
+    uNormalFadeNear: { value: 90.0 },
+    uNormalFadeFar:  { value: 360.0 },
     uSplatScale: { value: 1.0 },
     uSplatBias: { value: 3.3 },     // pow() applied to splat weights — higher = chunkier
     uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
@@ -341,6 +345,10 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform sampler2D uNormalRockyZ;
   uniform sampler2D uNormalSandyW;
   uniform float uTextureScale;
+  uniform float uTextureQuality;
+  uniform float uTerrainNormals;
+  uniform float uNormalFadeNear;
+  uniform float uNormalFadeFar;
   uniform vec3 uSunDir;
   uniform vec3 uSunColor;
   uniform vec3 uAmbientColor;
@@ -380,7 +388,11 @@ export const TERRAIN_FRAG = /* glsl */`
       vec2 patchLocal = worldXZ - uPatchCenter;
       float patchEdge = max(abs(patchLocal.x), abs(patchLocal.y));
       float fadeIn = smoothstep(uPatchHalfSize * 0.72, uPatchHalfSize * 0.92, patchEdge);
-      if (ditherHash(gl_FragCoord.xy) > fadeIn) {
+      // Hash in world-space (NOT screen-space) so the dither pattern locks
+      // to the ground rather than reading as an overlay on the monitor. No
+      // floor() — we want per-pixel speckle, not quantized world cells, or
+      // each cell discards as a chunky patch instead of a fine dot.
+      if (ditherHash(worldXZ * 73.0) > fadeIn) {
         discard;
       }
     #endif
@@ -402,13 +414,22 @@ export const TERRAIN_FRAG = /* glsl */`
     // distance" instruction without forcing a hard mip cliff).
     float farBlend = mix(0.55, 0.92, smoothstep(80.0, 800.0, distView));
 
-    vec3 cRock   = mix(texture2D(uTexRock,   tileUv).rgb, texture2D(uTexRock,   tileUvFar).rgb, farBlend);
-    vec3 cGrass  = mix(texture2D(uTexGrass,  tileUv).rgb, texture2D(uTexGrass,  tileUvFar).rgb, farBlend);
-    vec3 cGravel = mix(texture2D(uTexGravel, tileUv).rgb, texture2D(uTexGravel, tileUvFar).rgb, farBlend);
-    vec3 cSand   = mix(texture2D(uTexSand,   tileUv).rgb, texture2D(uTexSand,   tileUvFar).rgb, farBlend);
-    vec3 cRipBed = mix(texture2D(uTexRipBed, tileUv).rgb, texture2D(uTexRipBed, tileUvFar).rgb, farBlend);
-    vec3 cRockyZ = mix(texture2D(uTexRockyZ, tileUv).rgb, texture2D(uTexRockyZ, tileUvFar).rgb, farBlend);
-    vec3 cSandyW = mix(texture2D(uTexSandyW, tileUv).rgb, texture2D(uTexSandyW, tileUvFar).rgb, farBlend);
+    vec3 cRock   = texture2D(uTexRock,   tileUv).rgb;
+    vec3 cGrass  = texture2D(uTexGrass,  tileUv).rgb;
+    vec3 cGravel = texture2D(uTexGravel, tileUv).rgb;
+    vec3 cSand   = texture2D(uTexSand,   tileUv).rgb;
+    vec3 cRipBed = texture2D(uTexRipBed, tileUv).rgb;
+    vec3 cRockyZ = texture2D(uTexRockyZ, tileUv).rgb;
+    vec3 cSandyW = texture2D(uTexSandyW, tileUv).rgb;
+    if (uTextureQuality > 1.5) {
+      cRock   = mix(cRock,   texture2D(uTexRock,   tileUvFar).rgb, farBlend);
+      cGrass  = mix(cGrass,  texture2D(uTexGrass,  tileUvFar).rgb, farBlend);
+      cGravel = mix(cGravel, texture2D(uTexGravel, tileUvFar).rgb, farBlend);
+      cSand   = mix(cSand,   texture2D(uTexSand,   tileUvFar).rgb, farBlend);
+      cRipBed = mix(cRipBed, texture2D(uTexRipBed, tileUvFar).rgb, farBlend);
+      cRockyZ = mix(cRockyZ, texture2D(uTexRockyZ, tileUvFar).rgb, farBlend);
+      cSandyW = mix(cSandyW, texture2D(uTexSandyW, tileUvFar).rgb, farBlend);
+    }
 
     // Sharpen each tile's contrast — pushes "small rocks, light/dark breakup"
     // visible in the source PNGs into the rendered surface.
@@ -435,20 +456,30 @@ export const TERRAIN_FRAG = /* glsl */`
     vec3 albedo =
         cRock   * splat.r + cGrass   * splat.g + cGravel  * splat.b + cSand    * splat.a
       + cRipBed * splatB.r + cRockyZ * splatB.g + cSandyW * splatB.b;
+    if (uTextureQuality < 0.5) {
+      albedo = vec3(0.30, 0.25, 0.19) * splat.r
+             + vec3(0.36, 0.33, 0.22) * splat.g
+             + vec3(0.42, 0.37, 0.29) * splat.b
+             + vec3(0.58, 0.50, 0.36) * splat.a
+             + vec3(0.32, 0.27, 0.20) * splatB.r
+             + vec3(0.24, 0.22, 0.19) * splatB.g
+             + vec3(0.50, 0.43, 0.31) * splatB.b;
+    }
 
     // Per-tile normal maps. Sample each one in tangent space, splat-blend by
     // material weights, then transform the result through the TBN basis into
     // world space. This is the standard tangent-space normal mapping setup —
     // it's what makes the maps actually shift the lighting (an additive
     // world-space perturbation barely changes NdotL for upward-facing terrain).
-    float detailAmt = 1.0 - smoothstep(80.0, 900.0, distView);
-    vec3 nRock   = texture2D(uNormalRock,   tileUv).rgb * 2.0 - 1.0;
-    vec3 nGrass  = texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0;
-    vec3 nGravel = texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0;
-    vec3 nSand   = texture2D(uNormalSand,   tileUv).rgb * 2.0 - 1.0;
-    vec3 nRipBed = texture2D(uNormalRipBed, tileUv).rgb * 2.0 - 1.0;
-    vec3 nRockyZ = texture2D(uNormalRockyZ, tileUv).rgb * 2.0 - 1.0;
-    vec3 nSandyW = texture2D(uNormalSandyW, tileUv).rgb * 2.0 - 1.0;
+    float detailAmt = (1.0 - smoothstep(uNormalFadeNear, uNormalFadeFar, distView)) * uTerrainNormals;
+    float normalEnabled = step(0.5, uTextureQuality) * step(0.5, uTerrainNormals);
+    vec3 nRock   = normalEnabled > 0.5 ? texture2D(uNormalRock,   tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nGrass  = normalEnabled > 0.5 ? texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nGravel = normalEnabled > 0.5 ? texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nSand   = normalEnabled > 0.5 ? texture2D(uNormalSand,   tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nRipBed = normalEnabled > 0.5 ? texture2D(uNormalRipBed, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nRockyZ = normalEnabled > 0.5 ? texture2D(uNormalRockyZ, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nSandyW = normalEnabled > 0.5 ? texture2D(uNormalSandyW, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
     vec3 nTangent =
         nRock   * splat.r + nGrass   * splat.g + nGravel  * splat.b + nSand    * splat.a
       + nRipBed * splatB.r + nRockyZ * splatB.g + nSandyW * splatB.b;

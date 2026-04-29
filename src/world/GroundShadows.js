@@ -15,7 +15,9 @@ const SHADOW_CFG = {
     yOffset: 0.09,
     minHeight: 0.85,
     opacity: 0.74,
-    speciesIds: new Set([0, 1, 2, 3, 5, 6, 8])
+    speciesIds: new Set([0, 1, 2, 3, 5, 6, 8]),
+    farSpeciesIds: new Set([0, 5, 8]),
+    farMinHeight: 2.2
   }
 };
 
@@ -151,9 +153,11 @@ function createPlantShadows(instances, settings, groundY) {
   const meshes = new Map();
   let totalCount = 0;
 
-  function addChunk(key, chunkInstances) {
+  function addChunk(key, chunkInstances, mode = 'dense') {
     removeChunk(key);
-    const chunks = buildPlantShadowChunks(chunkInstances, SHADOW_CFG.plants.chunkSize, groundY);
+    const chunks = mode === 'far'
+      ? buildFarPlantShadowChunks(chunkInstances, SHADOW_CFG.plants.chunkSize, groundY)
+      : buildPlantShadowChunks(chunkInstances, SHADOW_CFG.plants.chunkSize, groundY);
     let added = 0;
     for (const chunk of chunks) {
     const geometry = new THREE.BufferGeometry();
@@ -292,6 +296,68 @@ function buildPlantShadowChunks(instances, chunkSize, groundY) {
   return chunks;
 }
 
+function buildFarPlantShadowChunks(instances, chunkSize, groundY) {
+  const meta = new Map();
+  for (let i = 0; i < instances.count; i++) {
+    const speciesId = instances.species[i];
+    const scale = instances.scales[i];
+    if (!SHADOW_CFG.plants.farSpeciesIds.has(speciesId) || scale < SHADOW_CFG.plants.farMinHeight) continue;
+
+    const x = instances.positions[i * 3 + 0];
+    const y = instances.positions[i * 3 + 1];
+    const z = instances.positions[i * 3 + 2];
+    const cx = Math.floor(x / chunkSize);
+    const cz = Math.floor(z / chunkSize);
+    const key = `${cx},${cz}`;
+    let chunk = meta.get(key);
+    if (!chunk) {
+      chunk = {
+        key,
+        count: 0,
+        items: [],
+        minX: Infinity, maxX: -Infinity,
+        minY: Infinity, maxY: -Infinity,
+        minZ: Infinity, maxZ: -Infinity
+      };
+      meta.set(key, chunk);
+    }
+    const sp = SPECIES[speciesId];
+    const radiusX = Math.max(0.75, scale * sp.aspect * 0.58);
+    const radiusZ = Math.max(0.60, scale * 0.42);
+    const rot = instances.rotations[i] + 0.35;
+    chunk.items.push({ x, y, z, radiusX, radiusZ, rot });
+    chunk.count++;
+    chunk.minX = Math.min(chunk.minX, x - radiusX);
+    chunk.maxX = Math.max(chunk.maxX, x + radiusX);
+    chunk.minY = Math.min(chunk.minY, y);
+    chunk.maxY = Math.max(chunk.maxY, y + 0.1);
+    chunk.minZ = Math.min(chunk.minZ, z - radiusZ);
+    chunk.maxZ = Math.max(chunk.maxZ, z + radiusZ);
+  }
+
+  const chunks = [];
+  for (const chunk of meta.values()) {
+    const grid = buildFlatChunkGeometry(chunk.items, groundY);
+    chunk.positions = grid.positions;
+    chunk.centers = grid.centers;
+    chunk.uvs = grid.uvs;
+    chunk.indices = grid.indices;
+    chunk.center = new THREE.Vector3(
+      (chunk.minX + chunk.maxX) * 0.5,
+      (chunk.minY + chunk.maxY) * 0.5,
+      (chunk.minZ + chunk.maxZ) * 0.5
+    );
+    const hx = (chunk.maxX - chunk.minX) * 0.5;
+    const hy = (chunk.maxY - chunk.minY) * 0.5;
+    const hz = (chunk.maxZ - chunk.minZ) * 0.5;
+    chunk.radiusXZ = Math.hypot(hx, hz);
+    chunk.radius = Math.hypot(chunk.radiusXZ, hy);
+    delete chunk.items;
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
 function buildChunkGridGeometry(items, groundY) {
   const gridN = 3;
   const vertsPerShadow = gridN * gridN;
@@ -348,6 +414,50 @@ function buildChunkGridGeometry(items, groundY) {
     }
   }
 
+  return { positions, centers, uvs, indices };
+}
+
+function buildFlatChunkGeometry(items, groundY) {
+  const positions = new Float32Array(items.length * 4 * 3);
+  const centers = new Float32Array(items.length * 4 * 3);
+  const uvs = new Float32Array(items.length * 4 * 2);
+  const indices = new Uint32Array(items.length * 6);
+  const sampleY = groundY || ((x, z, fallback) => fallback);
+  let vWrite = 0;
+  let uvWrite = 0;
+  let iWrite = 0;
+  for (const item of items) {
+    const baseVertex = vWrite / 3;
+    const c = Math.cos(item.rot);
+    const s = Math.sin(item.rot);
+    const y = sampleY(item.x, item.z, item.y);
+    const corners = [
+      [-1, -1, 0, 0],
+      [ 1, -1, 1, 0],
+      [ 1,  1, 1, 1],
+      [-1,  1, 0, 1]
+    ];
+    for (const corner of corners) {
+      const localX = corner[0] * item.radiusX;
+      const localZ = corner[1] * item.radiusZ;
+      positions[vWrite + 0] = item.x + c * localX - s * localZ;
+      positions[vWrite + 1] = y;
+      positions[vWrite + 2] = item.z + s * localX + c * localZ;
+      centers[vWrite + 0] = item.x;
+      centers[vWrite + 1] = y;
+      centers[vWrite + 2] = item.z;
+      vWrite += 3;
+      uvs[uvWrite + 0] = corner[2];
+      uvs[uvWrite + 1] = corner[3];
+      uvWrite += 2;
+    }
+    indices[iWrite++] = baseVertex + 0;
+    indices[iWrite++] = baseVertex + 2;
+    indices[iWrite++] = baseVertex + 1;
+    indices[iWrite++] = baseVertex + 0;
+    indices[iWrite++] = baseVertex + 3;
+    indices[iWrite++] = baseVertex + 2;
+  }
   return { positions, centers, uvs, indices };
 }
 

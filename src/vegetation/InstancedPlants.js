@@ -19,13 +19,21 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
   const activeChunks = new Map();
   const queued = new Map();
   const generationQueue = [];
+  const streamStats = {
+    dense: createEmptyStats('dense'),
+    far: createEmptyStats('far'),
+    activeDenseChunks: 0,
+    activeFarChunks: 0,
+    activeDenseInstances: 0,
+    activeFarInstances: 0
+  };
   const streamCfg = {
     denseRadius: 3200,
     farRadius: 6500,
     unloadRadius: 7200,
     maxGeneratePerFrame: 3,
     dense: { cellSize: 4.0, globalDensity: 2.2, maxPerChunk: 14000 },
-    far: { cellSize: 14.0, globalDensity: 1.45, maxPerChunk: 4200 }
+    far: { cellSize: 14.0, globalDensity: 1.65, acceptancePower: 0.82, acceptanceFloor: 0.035, maxPerChunk: 4200 }
   };
 
   // Build atlas-rect lookup as a Vec4 array uniform: [uOffset, vOffset, uScale, vScale].
@@ -194,11 +202,14 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
       groundY,
       chunkX: d.cx,
       chunkZ: d.cz,
-      chunkSize,
-      cellSize: cfg.cellSize,
-      globalDensity: cfg.globalDensity,
-      maxPerChunk: cfg.maxPerChunk
-    });
+        chunkSize,
+        cellSize: cfg.cellSize,
+        globalDensity: cfg.globalDensity,
+        acceptancePower: cfg.acceptancePower ?? 1,
+        acceptanceFloor: cfg.acceptanceFloor ?? 0,
+        mode: d.mode,
+        maxPerChunk: cfg.maxPerChunk
+      });
     addChunkInstances(d.key, chunkInstances, d.mode);
     return true;
   }
@@ -260,11 +271,16 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
       key,
       mode,
       count: chunk.count,
+      stats: chunkInstances.stats,
       center: chunk.center,
       meshes: []
     };
     activeChunks.set(key, record);
-    if (chunk.count <= 0) return;
+    addStats(chunkInstances.stats);
+    if (chunk.count <= 0) {
+      updateActiveStats();
+      return;
+    }
 
     const tierIndices = mode === 'far' ? [2] : [0, 1, 2];
     for (const tierIndex of tierIndices) {
@@ -280,12 +296,14 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
       t.meshes.set(key, mesh);
       record.meshes.push({ tierIndex, mesh });
     }
-    if (shadows && mode === 'dense') shadows.addPlantChunk(key, chunkInstances, mode);
+    if (shadows) shadows.addPlantChunk(key, chunkInstances, mode);
+    updateActiveStats();
   }
 
   function removeChunk(key) {
     const record = activeChunks.get(key);
     if (!record) return;
+    subtractStats(record.stats);
     for (const { tierIndex, mesh } of record.meshes) {
       const t = tiers[tierIndex];
       t.mesh.remove(mesh);
@@ -294,6 +312,33 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
     }
     if (shadows) shadows.removePlantChunk(key);
     activeChunks.delete(key);
+    updateActiveStats();
+  }
+
+  function addStats(stats) {
+    if (!stats || !streamStats[stats.mode]) return;
+    addStatsTo(streamStats[stats.mode], stats, 1);
+  }
+
+  function subtractStats(stats) {
+    if (!stats || !streamStats[stats.mode]) return;
+    addStatsTo(streamStats[stats.mode], stats, -1);
+  }
+
+  function updateActiveStats() {
+    streamStats.activeDenseChunks = 0;
+    streamStats.activeFarChunks = 0;
+    streamStats.activeDenseInstances = 0;
+    streamStats.activeFarInstances = 0;
+    for (const record of activeChunks.values()) {
+      if (record.mode === 'dense') {
+        streamStats.activeDenseChunks++;
+        streamStats.activeDenseInstances += record.count;
+      } else {
+        streamStats.activeFarChunks++;
+        streamStats.activeFarInstances += record.count;
+      }
+    }
   }
 
   return {
@@ -306,6 +351,7 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
     },
     get chunkCount() { return activeChunks.size; },
     streamCfg,
+    streamStats,
     prewarm
   };
 }
@@ -346,6 +392,7 @@ function buildPlantChunks(instances, chunkSize) {
     chunk.scales = new Float32Array(chunk.count);
     chunk.rotations = new Float32Array(chunk.count);
     chunk.species = new Float32Array(chunk.count);
+    chunk.sourceModes = new Float32Array(chunk.count);
     chunk.write = 0;
   }
 
@@ -362,6 +409,7 @@ function buildPlantChunks(instances, chunkSize) {
     chunk.scales[j] = instances.scales[i];
     chunk.rotations[j] = instances.rotations[i];
     chunk.species[j] = instances.species[i];
+    chunk.sourceModes[j] = instances.sourceModes ? instances.sourceModes[i] : 0;
   }
 
   for (const chunk of chunks) {
@@ -383,12 +431,48 @@ function buildPlantChunks(instances, chunkSize) {
       scales: chunk.scales,
       rotations: chunk.rotations,
       species: chunk.species,
+      sourceModes: chunk.sourceModes,
       count: chunk.count
+    };
+    chunk.attribs = {
+      aOffset: new THREE.InstancedBufferAttribute(chunk.positions, 3),
+      aScale: new THREE.InstancedBufferAttribute(chunk.scales, 1),
+      aRotation: new THREE.InstancedBufferAttribute(chunk.rotations, 1),
+      aSpecies: new THREE.InstancedBufferAttribute(chunk.species, 1),
+      aSourceMode: new THREE.InstancedBufferAttribute(chunk.sourceModes, 1)
     };
     delete chunk.write;
   }
 
   return chunks;
+}
+
+function createEmptyStats(mode) {
+  return {
+    mode,
+    chunks: 0,
+    candidates: 0,
+    rejectedOutsideDem: 0,
+    rejectedSuitability: 0,
+    rejectedAcceptance: 0,
+    rejectedChunkOwnership: 0,
+    acceptedParents: 0,
+    emitted: 0,
+    capped: 0
+  };
+}
+
+function addStatsTo(target, stats, sign) {
+  if (!stats) return;
+  target.chunks += sign;
+  target.candidates += stats.candidates * sign;
+  target.rejectedOutsideDem += stats.rejectedOutsideDem * sign;
+  target.rejectedSuitability += stats.rejectedSuitability * sign;
+  target.rejectedAcceptance += stats.rejectedAcceptance * sign;
+  target.rejectedChunkOwnership += stats.rejectedChunkOwnership * sign;
+  target.acceptedParents += stats.acceptedParents * sign;
+  target.emitted += stats.emitted * sign;
+  target.capped += (stats.capped ? 1 : 0) * sign;
 }
 
 function makeChunkFromInstances(key, instances, chunkSize) {
@@ -433,7 +517,8 @@ function makeChunkFromInstances(key, instances, chunkSize) {
       aOffset: new THREE.InstancedBufferAttribute(instances.positions, 3),
       aScale: new THREE.InstancedBufferAttribute(instances.scales, 1),
       aRotation: new THREE.InstancedBufferAttribute(instances.rotations, 1),
-      aSpecies: new THREE.InstancedBufferAttribute(new Float32Array(instances.species), 1)
+      aSpecies: new THREE.InstancedBufferAttribute(new Float32Array(instances.species), 1),
+      aSourceMode: new THREE.InstancedBufferAttribute(instances.sourceModes || new Float32Array(instances.count), 1)
     }
   };
 }
@@ -515,6 +600,7 @@ const VERT = /* glsl */`
   attribute float aScale;
   attribute float aRotation;
   attribute float aSpecies;
+  attribute float aSourceMode;
   uniform vec4 uRects[12];
   uniform float uAspects[12];
   uniform float uTierMin;
@@ -524,6 +610,7 @@ const VERT = /* glsl */`
   uniform float uTime;
   varying vec2 vAtlasUv;
   varying float vFade;
+  varying float vFarSource;
   varying vec3 vWorldPos;
   varying vec3 vNormal;
 
@@ -542,7 +629,8 @@ const VERT = /* glsl */`
     vec3 rp = vec3(c * lp.x - s * lp.z, lp.y, s * lp.x + c * lp.z);
 
     // Subtle wind sway (only top of plant moves).
-    float sway = sin(uTime * 1.2 + aOffset.x * 0.05 + aOffset.z * 0.04) * 0.04;
+    vFarSource = clamp(aSourceMode, 0.0, 1.0);
+    float sway = sin(uTime * 1.2 + aOffset.x * 0.05 + aOffset.z * 0.04) * 0.04 * (1.0 - vFarSource * 0.75);
     rp.x += sway * lp.y * 0.4;
 
     vec3 worldPos = rp + aOffset;
@@ -582,6 +670,7 @@ const FRAG = /* glsl */`
   uniform float uLanternIntensity;
   varying vec2 vAtlasUv;
   varying float vFade;
+  varying float vFarSource;
   varying vec3 vWorldPos;
   varying vec3 vNormal;
 
@@ -600,7 +689,7 @@ const FRAG = /* glsl */`
     float lanternD = length(toLantern);
     float lanternAtt = clamp(1.0 - lanternD / uLanternRange, 0.0, 1.0);
     lanternAtt *= lanternAtt;
-    lit += tex.rgb * uLanternColor * 0.9 * lanternAtt * uLanternIntensity;
+    lit += tex.rgb * uLanternColor * 0.9 * lanternAtt * uLanternIntensity * (1.0 - vFarSource);
 
     lit *= uExposure;
 
@@ -619,6 +708,8 @@ const FRAG = /* glsl */`
     float horizonTakeover = smoothstep(0.85, 1.0, fog);
     fogCol = mix(fogCol, uFogColorFar, horizonTakeover);
     fog = mix(fog, 1.0, horizonTakeover);
+    fog = mix(fog, min(1.0, fog + 0.16), vFarSource);
+    lit = mix(lit, vec3(dot(lit, vec3(0.299, 0.587, 0.114))), vFarSource * 0.18);
     lit = mix(lit, fogCol, fog);
 
     gl_FragColor = vec4(lit, 1.0);

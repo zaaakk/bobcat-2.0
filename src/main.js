@@ -351,6 +351,26 @@ async function main() {
             onInput: v => u.uFineTileSize.value = v,
           });
           panelRow(el, {
+            label: 'Texture quality', min: 0, max: 2, step: 1,
+            value: u.uTextureQuality.value,
+            onInput: v => u.uTextureQuality.value = v,
+          });
+          const terrainNormalsMode = () => u.uTerrainNormals.value > 0.5 ? 'ON' : 'OFF';
+          const terrainNormalsBtn = panelButton(el, `Terrain normals: ${terrainNormalsMode()}`, () => {
+            u.uTerrainNormals.value = u.uTerrainNormals.value > 0.5 ? 0.0 : 1.0;
+            terrainNormalsBtn.textContent = `Terrain normals: ${terrainNormalsMode()}`;
+          });
+          panelRow(el, {
+            label: 'Normal fade near', min: 0, max: 400, step: 5,
+            value: u.uNormalFadeNear.value,
+            onInput: v => u.uNormalFadeNear.value = v,
+          });
+          panelRow(el, {
+            label: 'Normal fade far', min: 20, max: 1200, step: 10,
+            value: u.uNormalFadeFar.value,
+            onInput: v => u.uNormalFadeFar.value = v,
+          });
+          panelRow(el, {
             label: 'Mask lo', min: 0, max: 1, step: 0.01,
             value: u.uMaskLo.value,
             onInput: v => u.uMaskLo.value = v,
@@ -380,6 +400,10 @@ async function main() {
             u.uBedSlopeHi.value = 0.24;
             u.uFineAmp.value = 0.08;
             u.uFineTileSize.value = 24.0;
+            u.uTextureQuality.value = 2.0;
+            u.uTerrainNormals.value = 1.0;
+            u.uNormalFadeNear.value = 90.0;
+            u.uNormalFadeFar.value = 360.0;
             u.uMaskLo.value = 0.20;
             u.uMaskHi.value = 0.55;
             u.uBenchMaskLo.value = 0.24;
@@ -399,6 +423,21 @@ async function main() {
             baseMat.wireframe = next;
             for (const patchMat of patchMats) patchMat.wireframe = next;
             wireBtn.textContent = `Wireframe: ${next ? 'ON' : 'OFF'}`;
+          });
+          const visibleMode = obj => obj.visible ? 'ON' : 'OFF';
+          const baseVisibleBtn = panelButton(el, `Base terrain: ${visibleMode(world.terrain.mesh)}`, () => {
+            world.terrain.mesh.visible = !world.terrain.mesh.visible;
+            baseVisibleBtn.textContent = `Base terrain: ${visibleMode(world.terrain.mesh)}`;
+          });
+          if (world.farDetailPatch) {
+            const farPatchBtn = panelButton(el, `Far patch: ${visibleMode(world.farDetailPatch.mesh)}`, () => {
+              world.farDetailPatch.mesh.visible = !world.farDetailPatch.mesh.visible;
+              farPatchBtn.textContent = `Far patch: ${visibleMode(world.farDetailPatch.mesh)}`;
+            });
+          }
+          const nearPatchBtn = panelButton(el, `Near patch: ${visibleMode(world.detailPatch.mesh)}`, () => {
+            world.detailPatch.mesh.visible = !world.detailPatch.mesh.visible;
+            nearPatchBtn.textContent = `Near patch: ${visibleMode(world.detailPatch.mesh)}`;
           });
           // Note: TerrainQuery still uses the bake-time defaults for CPU
           // groundY, so cranking these in the panel changes only what the

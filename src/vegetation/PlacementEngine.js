@@ -205,12 +205,16 @@ export function generateVegetationChunk({
   groundY,
   chunkX,
   chunkZ,
+  mode = 'dense',
   chunkSize = 512,
   cellSize = 4,
   globalDensity = 1,
+  acceptancePower = 1,
+  acceptanceFloor = 0,
   jitter = 1,
   maxPerChunk = 12000
 }) {
+  const sourceMode = mode === 'far' ? 1 : 0;
   const minX = chunkX * chunkSize;
   const minZ = chunkZ * chunkSize;
   const maxX = minX + chunkSize;
@@ -230,22 +234,41 @@ export function generateVegetationChunk({
   const scales = new Float32Array(maxPerChunk);
   const rotations = new Float32Array(maxPerChunk);
   const speciesId = new Uint8Array(maxPerChunk);
+  const sourceModes = new Float32Array(maxPerChunk);
   const speciesScores = new Array(SPECIES.length);
+  const stats = {
+    mode,
+    candidates: 0,
+    rejectedOutsideDem: 0,
+    rejectedSuitability: 0,
+    rejectedAcceptance: 0,
+    rejectedChunkOwnership: 0,
+    acceptedParents: 0,
+    emitted: 0,
+    capped: false
+  };
   let n = 0;
 
   for (let j = minJ; j <= maxJ; j++) {
     for (let i = minI; i <= maxI; i++) {
-      if (n >= maxPerChunk) break;
+      if (n >= maxPerChunk) { stats.capped = true; break; }
+      stats.candidates++;
 
       const baseX = (i + 0.5) * cellSize;
       const baseZ = (j + 0.5) * cellSize;
-      if (baseX < -halfW || baseX > halfW || baseZ < -halfH || baseZ > halfH) continue;
+      if (baseX < -halfW || baseX > halfW || baseZ < -halfH || baseZ > halfH) {
+        stats.rejectedOutsideDem++;
+        continue;
+      }
 
       const jx = STREAM_NOISE.jitter(i * 0.31, j * 0.27);
       const jz = STREAM_NOISE.jitter(i * 0.19 + 7.1, j * 0.23 + 3.7);
       const x = baseX + jx * cellSize * jitter;
       const z = baseZ + jz * cellSize * jitter;
-      if (x < -halfW || x > halfW || z < -halfH || z > halfH) continue;
+      if (x < -halfW || x > halfW || z < -halfH || z > halfH) {
+        stats.rejectedOutsideDem++;
+        continue;
+      }
 
       const slope = sampleSlope(dem, x, z);
       const slopeT = Math.min(1, slope / (Math.PI / 2));
@@ -273,11 +296,19 @@ export function generateVegetationChunk({
         sumScores += score;
         if (score > bestScore) { bestScore = score; bestK = k; }
       }
-      if (bestK < 0 || sumScores <= 0) continue;
+      if (bestK < 0 || sumScores <= 0) {
+        stats.rejectedSuitability++;
+        continue;
+      }
 
-      const accept = Math.min(1, bestScore * globalDensity);
+      const acceptBase = Math.pow(Math.max(0, bestScore), acceptancePower) * globalDensity;
+      const accept = Math.min(1, Math.max(acceptanceFloor, acceptBase));
       const rand = (STREAM_NOISE.accept(i * 1.13 + 5.0, j * 1.07 + 9.0) + 1) * 0.5;
-      if (rand > accept) continue;
+      if (rand > accept) {
+        stats.rejectedAcceptance++;
+        continue;
+      }
+      stats.acceptedParents++;
 
       const pick = ((STREAM_NOISE.accept(i * 0.71 + 11.0, j * 0.69 + 13.0) + 1) * 0.5) * sumScores;
       let cum = 0, chosen = bestK;
@@ -292,7 +323,7 @@ export function generateVegetationChunk({
       const clusterCount = Math.max(1, Math.round(clusterMin + ((STREAM_NOISE.accept(i * 0.79 + 23.0, j * 0.73 + 29.0) + 1) * 0.5) * (clusterMax - clusterMin)));
 
       for (let c = 0; c < clusterCount; c++) {
-        if (n >= maxPerChunk) break;
+        if (n >= maxPerChunk) { stats.capped = true; break; }
 
         let px = x;
         let pz = z;
@@ -304,8 +335,14 @@ export function generateVegetationChunk({
           pz += Math.sin(ang) * radius;
         }
 
-        if (px < minX || px >= maxX || pz < minZ || pz >= maxZ) continue;
-        if (px < -halfW || px > halfW || pz < -halfH || pz > halfH) continue;
+        if (px < minX || px >= maxX || pz < minZ || pz >= maxZ) {
+          stats.rejectedChunkOwnership++;
+          continue;
+        }
+        if (px < -halfW || px > halfW || pz < -halfH || pz > halfH) {
+          stats.rejectedOutsideDem++;
+          continue;
+        }
 
         const sizeRand = ((STREAM_NOISE.accept(i * 0.57 + c * 3.7, j * 0.61 + c * 2.9) + 1) * 0.5);
         const rot = ((STREAM_NOISE.accept(i * 0.33 + 17.0 + c * 5.3, j * 0.41 + 19.0 + c * 4.1) + 1) * 0.5) * Math.PI * 2;
@@ -317,7 +354,9 @@ export function generateVegetationChunk({
         scales[n] = h;
         rotations[n] = rot;
         speciesId[n] = chosen;
+        sourceModes[n] = sourceMode;
         n++;
+        stats.emitted++;
       }
     }
   }
@@ -330,6 +369,8 @@ export function generateVegetationChunk({
     scales: scales.subarray(0, n),
     rotations: rotations.subarray(0, n),
     species: speciesId.subarray(0, n),
+    sourceModes: sourceModes.subarray(0, n),
+    stats,
     count: n
   };
 }

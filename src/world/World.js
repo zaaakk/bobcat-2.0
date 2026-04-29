@@ -113,7 +113,7 @@ export class World {
     });
     this.scene.add(this.terrain.mesh);
 
-    const farPatchSize = 900, farPatchResolution = 768;
+    const farPatchSize = 900, farPatchResolution = 384;
     this.terrain.uniforms.uPatchHalfSize.value = farPatchSize * 0.5;
     const farPatch = createDetailPatch({
       terrain: this.terrain,
@@ -136,6 +136,7 @@ export class World {
     });
     this.scene.add(this.detailPatch.mesh);
     this.detailPatches = [farPatch, this.detailPatch];
+    this.farDetailPatch = farPatch;
     this.terrainQuery.patchSpacing = patchSize / patchResolution;
 
     // (Step 7) Water — pools list is pre-computed so we just build the mesh.
