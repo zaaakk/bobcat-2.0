@@ -23,13 +23,26 @@ async function main() {
   // ---------- renderer ----------
   const canvas = document.createElement('canvas');
   document.getElementById('app').appendChild(canvas);
+  let nightVision = null;
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
     powerPreference: 'high-performance'
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6));
-  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  const renderSettings = {
+    scale: 1.0,
+    auto: true,
+    minScale: 0.60,
+    maxScale: 1.0,
+  };
+  const basePixelRatio = () => Math.min(window.devicePixelRatio || 1, 1.6);
+  const applyRenderScale = scale => {
+    renderSettings.scale = THREE.MathUtils.clamp(scale, renderSettings.minScale, renderSettings.maxScale);
+    renderer.setPixelRatio(basePixelRatio() * renderSettings.scale);
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    if (nightVision) nightVision.resize(renderer.domElement.width, renderer.domElement.height);
+  };
+  applyRenderScale(renderSettings.scale);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -37,12 +50,10 @@ async function main() {
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 25000);
 
-  let nightVision = null;
   window.addEventListener('resize', () => {
-    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    applyRenderScale(renderSettings.scale);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    if (nightVision) nightVision.resize(renderer.domElement.width, renderer.domElement.height);
   });
 
   // ---------- sky ----------
@@ -207,10 +218,26 @@ async function main() {
             value: nightVision.uniforms.uContrast.value,
             onInput: v => nightVision.uniforms.uContrast.value = v
           });
+          panelRow(el, {
+            label: 'Render scale', min: renderSettings.minScale, max: renderSettings.maxScale, step: 0.05,
+            value: renderSettings.scale,
+            format: v => `${Math.round(v * 100)}%`,
+            onInput: v => {
+              renderSettings.auto = false;
+              applyRenderScale(v);
+            }
+          });
+          const autoScaleMode = () => renderSettings.auto ? 'ON' : 'OFF';
+          const autoScaleBtn = panelButton(el, `Auto render scale: ${autoScaleMode()}`, () => {
+            renderSettings.auto = !renderSettings.auto;
+            autoScaleBtn.textContent = `Auto render scale: ${autoScaleMode()}`;
+          });
           panelButton(el, 'Reset', () => {
             nightVision.uniforms.uSaturation.value = 0.9;
             nightVision.uniforms.uBrightness.value = 1.1;
             nightVision.uniforms.uContrast.value = 0.9;
+            renderSettings.auto = true;
+            applyRenderScale(1.0);
             el.parentElement.querySelector('.dbg-tab.active').click();
           });
           const postGradeMode = () => nightVision.uniforms.uPostGrade.value > 0.5 ? 'ON' : 'OFF';
@@ -461,6 +488,36 @@ async function main() {
             value: u.uSplatBias.value,
             onInput: v => u.uSplatBias.value = v
           });
+          panelRow(el, {
+            label: 'Detail strength', min: 0, max: 1.5, step: 0.01,
+            value: u.uDetailStrength.value,
+            onInput: v => u.uDetailStrength.value = v
+          });
+          panelRow(el, {
+            label: 'Detail tile (m)', min: 0.2, max: 8, step: 0.05,
+            value: u.uDetailTileSize.value,
+            onInput: v => u.uDetailTileSize.value = v
+          });
+          panelRow(el, {
+            label: 'Detail fade near', min: 1, max: 80, step: 0.5,
+            value: u.uDetailFadeNear.value,
+            onInput: v => u.uDetailFadeNear.value = v
+          });
+          panelRow(el, {
+            label: 'Detail fade far', min: 10, max: 250, step: 1,
+            value: u.uDetailFadeFar.value,
+            onInput: v => u.uDetailFadeFar.value = v
+          });
+          panelRow(el, {
+            label: 'Detail mip bias', min: -1, max: 3, step: 0.05,
+            value: u.uDetailMipBias.value,
+            onInput: v => u.uDetailMipBias.value = v
+          });
+          panelRow(el, {
+            label: 'Detail AA', min: 0, max: 2, step: 0.05,
+            value: u.uDetailAaStrength.value,
+            onInput: v => u.uDetailAaStrength.value = v
+          });
           if (splat) {
             const p = splat.params;
             const slider = (label, key, min, max, step) => panelRow(el, {
@@ -491,6 +548,12 @@ async function main() {
               });
               u.uTextureScale.value = 51.5;
               u.uSplatBias.value = 3.3;
+              u.uDetailStrength.value = 1.50;
+              u.uDetailTileSize.value = 3.95;
+              u.uDetailFadeNear.value = 1.0;
+              u.uDetailFadeFar.value = 10.0;
+              u.uDetailMipBias.value = -1.0;
+              u.uDetailAaStrength.value = 1.0;
               el.parentElement.querySelector('.dbg-tab.active').click();
             });
           }
@@ -540,7 +603,6 @@ async function main() {
   const clock = new THREE.Clock();
   let last = performance.now();
   let fpsAccum = 0, fpsFrames = 0;
-  let qualityLevel = 1; // 1 = full, can drop to 0.85
   let displayFps = 60;
   let lastFootAt = 0;
 
@@ -653,18 +715,19 @@ async function main() {
     const nightAmount = 1.0 - THREE.MathUtils.smoothstep(trueSunY, -0.18, 0.06);
     nightVision.render(scene, camera, t, nightAmount);
 
-    // Adaptive resolution if frametime spikes.
+    // Adaptive resolution if frametime spikes. Manual changes in the debug
+    // menu disable this so render scale stays exactly where the user put it.
     fpsAccum += dt; fpsFrames++;
-    if (fpsAccum > 1.0) {
+    if (renderSettings.auto && fpsAccum > 1.0) {
       const fps = fpsFrames / fpsAccum;
       fpsAccum = 0; fpsFrames = 0;
-      if (fps < 45 && qualityLevel > 0.7) {
-        qualityLevel = Math.max(0.7, qualityLevel - 0.05);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6) * qualityLevel);
-      } else if (fps > 58 && qualityLevel < 1) {
-        qualityLevel = Math.min(1, qualityLevel + 0.05);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.6) * qualityLevel);
+      if (fps < 45 && renderSettings.scale > renderSettings.minScale) {
+        applyRenderScale(renderSettings.scale - 0.05);
+      } else if (fps > 58 && renderSettings.scale < renderSettings.maxScale) {
+        applyRenderScale(renderSettings.scale + 0.05);
       }
+    } else if (!renderSettings.auto && fpsAccum > 1.0) {
+      fpsAccum = 0; fpsFrames = 0;
     }
 
     requestAnimationFrame(frame);

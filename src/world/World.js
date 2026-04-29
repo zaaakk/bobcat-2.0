@@ -105,7 +105,8 @@ export class World {
     this.terrain = createTerrainMesh({
       dem: this.dem, heightTex, splatTex: splatPair,
       groundTextures: ground.diffuse,
-      groundNormals:  ground.normals,
+      normalAtlas: ground.normalAtlas,
+      groundDetail: ground.groundDetail,
       normalTex: ground.defaultNormal,
       detailNoise: this.detailNoise,
       segments: this.terrainSegments,

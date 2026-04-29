@@ -7,7 +7,7 @@ import * as THREE from 'three';
  * Vertex grid is fixed (segments x segments); the heightmap texture is sampled in
  * the vertex shader. Splatmap blends four ground textures in the fragment shader.
  */
-export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, groundNormals, normalTex, detailNoise = null, segments = 512, edgePadding = 8000 }) {
+export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, normalAtlas = null, groundDetail = null, normalTex, detailNoise = null, segments = 512, edgePadding = 8000 }) {
   const planeWidth = dem.worldWidth + edgePadding * 2;
   const planeHeight = dem.worldHeight + edgePadding * 2;
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, segments, segments);
@@ -27,16 +27,22 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uTexRipBed: { value: groundTextures.riparianbed || groundTextures.sand },
     uTexRockyZ: { value: groundTextures.rockyZone   || groundTextures.rock },
     uTexSandyW: { value: groundTextures.sandyWash   || groundTextures.sand },
-    // Per-tile normal maps (sliced from each [tex]normals.png 2×2 atlas).
-    // These replace the single generic detail-normal in the splat blend, so
-    // each ground type's surface micro-detail follows its own diffuse pattern.
-    uNormalRock:   { value: groundNormals?.rock   || normalTex },
-    uNormalGrass:  { value: groundNormals?.grass  || normalTex },
-    uNormalGravel: { value: groundNormals?.gravel || normalTex },
-    uNormalSand:   { value: groundNormals?.sand   || normalTex },
-    uNormalRipBed: { value: groundNormals?.riparianbed || normalTex },
-    uNormalRockyZ: { value: groundNormals?.rockyZone   || normalTex },
-    uNormalSandyW: { value: groundNormals?.sandyWash   || normalTex },
+    // Per-tile normal maps packed into a single 4×2 atlas (one sampler so we
+    // stay under the macOS WebGL fragment sampler limit of 16). Per-material
+    // tile offsets are constants in the fragment shader.
+    uNormalAtlas:  { value: normalAtlas || normalTex },
+    uHasNormalAtlas: { value: normalAtlas ? 1.0 : 0.0 },
+    // Single grayscale detail texture, tiled across the world. Multiplied
+    // into the splat-blended albedo at close range to break up the macro
+    // tile repeat. One sampler, one tap, no atlas math.
+    uGroundDetail:    { value: groundDetail || normalTex },
+    uHasGroundDetail: { value: groundDetail ? 1.0 : 0.0 },
+    uDetailStrength:  { value: 1.50 },  // how much to lean into it (0=off, 1=full)
+    uDetailTileSize:  { value: 3.95 },  // metres per detail tile repeat
+    uDetailFadeNear:  { value: 1.0 },   // m — full strength
+    uDetailFadeFar:   { value: 10.0 },  // m — fully gone past this (kills mid-distance moiré)
+    uDetailMipBias:   { value: -1.0 },  // positive = softer sooner
+    uDetailAaStrength:{ value: 1.0 },   // suppresses undersampled shimmer bands
     uMinZ: { value: dem.minZ },
     uMaxZ: { value: dem.maxZ },
     uDemSize: { value: new THREE.Vector2(dem.worldWidth, dem.worldHeight) },
@@ -118,6 +124,10 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, gr
     uniforms,
     vertexShader: TERRAIN_VERT,
     fragmentShader: TERRAIN_FRAG,
+    extensions: {
+      derivatives: true,
+      shaderTextureLOD: true,
+    },
     side: THREE.FrontSide,
     fog: false
   });
@@ -337,13 +347,16 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform sampler2D uTexRipBed;
   uniform sampler2D uTexRockyZ;
   uniform sampler2D uTexSandyW;
-  uniform sampler2D uNormalRock;
-  uniform sampler2D uNormalGrass;
-  uniform sampler2D uNormalGravel;
-  uniform sampler2D uNormalSand;
-  uniform sampler2D uNormalRipBed;
-  uniform sampler2D uNormalRockyZ;
-  uniform sampler2D uNormalSandyW;
+  uniform sampler2D uNormalAtlas;
+  uniform float uHasNormalAtlas;
+  uniform sampler2D uGroundDetail;
+  uniform float uHasGroundDetail;
+  uniform float uDetailStrength;
+  uniform float uDetailTileSize;
+  uniform float uDetailFadeNear;
+  uniform float uDetailFadeFar;
+  uniform float uDetailMipBias;
+  uniform float uDetailAaStrength;
   uniform float uTextureScale;
   uniform float uTextureQuality;
   uniform float uTerrainNormals;
@@ -466,20 +479,51 @@ export const TERRAIN_FRAG = /* glsl */`
              + vec3(0.50, 0.43, 0.31) * splatB.b;
     }
 
+    // Close-range detail: one grayscale tile, sampled at world-space coords.
+    // Use explicit distance LOD instead of implicit screen-space derivatives:
+    // near Nyquist, the implicit per-triangle mip choice beats against the
+    // terrain mesh and creates curved smear bands.
+    float detailFade = uHasGroundDetail * uDetailStrength
+                     * (1.0 - smoothstep(uDetailFadeNear, uDetailFadeFar, distView));
+    if (detailFade > 0.001) {
+      vec2 detailUv = worldXZ / max(uDetailTileSize, 0.001);
+      float detailFootprint = max(length(dFdx(detailUv)), length(dFdy(detailUv)));
+      float detailAlias = smoothstep(0.018, 0.055, detailFootprint);
+      float detailAa = clamp(uDetailAaStrength, 0.0, 2.0);
+      detailFade *= clamp(1.0 - detailAlias * detailAa, 0.0, 1.0);
+      float detailLod = clamp(
+        log2(max(distView, 1.0) / max(uDetailTileSize, 0.25))
+          + uDetailMipBias
+          + detailAlias * detailAa * 2.0,
+        0.0,
+        7.0
+      );
+      float d = texture2DLodEXT(uGroundDetail, detailUv, detailLod).r;
+      // Centred multiplier: 1.0 = no change, <1 darkens, >1 brightens. Light
+      // crevices read as occlusion; light grains as catchlight.
+      albedo *= mix(1.0, d * 2.0, detailFade);
+    }
+
     // Per-tile normal maps. Sample each one in tangent space, splat-blend by
     // material weights, then transform the result through the TBN basis into
     // world space. This is the standard tangent-space normal mapping setup —
     // it's what makes the maps actually shift the lighting (an additive
     // world-space perturbation barely changes NdotL for upward-facing terrain).
     float detailAmt = (1.0 - smoothstep(uNormalFadeNear, uNormalFadeFar, distView)) * uTerrainNormals;
-    float normalEnabled = step(0.5, uTextureQuality) * step(0.5, uTerrainNormals);
-    vec3 nRock   = normalEnabled > 0.5 ? texture2D(uNormalRock,   tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nGrass  = normalEnabled > 0.5 ? texture2D(uNormalGrass,  tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nGravel = normalEnabled > 0.5 ? texture2D(uNormalGravel, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nSand   = normalEnabled > 0.5 ? texture2D(uNormalSand,   tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nRipBed = normalEnabled > 0.5 ? texture2D(uNormalRipBed, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nRockyZ = normalEnabled > 0.5 ? texture2D(uNormalRockyZ, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
-    vec3 nSandyW = normalEnabled > 0.5 ? texture2D(uNormalSandyW, tileUv).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    float normalEnabled = step(0.5, uTextureQuality) * step(0.5, uTerrainNormals) * uHasNormalAtlas;
+    // Same atlas packing + same textureGrad trick as grit. Without the
+    // explicit derivatives, mipmap selection gets garbage at tile seams.
+    vec2 nTs = vec2(0.25, 0.50);
+    vec2 nDUVx = dFdx(tileUv) * nTs;
+    vec2 nDUVy = dFdy(tileUv) * nTs;
+    vec2 nLocal = fract(tileUv) * nTs;
+    vec3 nRock   = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.00, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nGrass  = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.25, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nGravel = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.50, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nSand   = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.75, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nRipBed = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.00, 0.50), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nRockyZ = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.25, 0.50), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
+    vec3 nSandyW = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.50, 0.50), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
     vec3 nTangent =
         nRock   * splat.r + nGrass   * splat.g + nGravel  * splat.b + nSand    * splat.a
       + nRipBed * splatB.r + nRockyZ * splatB.g + nSandyW * splatB.b;

@@ -2,19 +2,21 @@ import * as THREE from 'three';
 
 /**
  * Loads the ground-texture set used by TerrainMesh: 7 diffuse maps + 7 tile-
- * specific normal maps (sliced from each material's 2x2 atlas), plus the
- * legacy `normal.png` (still used as a default).
+ * specific normal maps (sliced from each material's 2x2 atlas), plus a
+ * secondary-diffuse slice (BL quad) used to break up the macro tile repeat
+ * at close range.
  *
  * Each `*normals.png` is a 2x2 atlas:
  *   TL (0,0)  diffuse copy   — unused; the original PNG is loaded separately
- *   TR (1,0)  normal map     — what we slice out here
- *   BL (0,1)  depth map      — reserved for parallax pass
+ *   TR (1,0)  normal map     — sliced into `normals`
+ *   BL (0,1)  secondary tile — sliced into `secondaries`. NOMINALLY a depth
+ *             map (per the source convention) but in practice some atlases
+ *             ship a second photographic diffuse here. Treated as sRGB so
+ *             both interpretations blend sensibly into the primary diffuse.
  *   BR (1,1)  ORM (RGB PBR)  — reserved for roughness/metalness pass
  *
  * Returns:
- *   { diffuse: { rock, grass, gravel, sand, riparianbed, rockyZone, sandyWash },
- *     normals: { rock, grass, gravel, sand, riparianbed, rockyZone, sandyWash },
- *     defaultNormal }
+ *   { diffuse, normals, secondaries, defaultNormal }
  */
 export async function loadGroundTextures(renderer) {
   const texLoader = new THREE.TextureLoader();
@@ -58,8 +60,35 @@ export async function loadGroundTextures(renderer) {
     img.src = url;
   });
 
+  const loadAtlas = (url, { srgb = false } = {}) => new Promise((res, rej) => {
+    texLoader.load(url, t => {
+      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.anisotropy = maxAniso;
+      t.generateMipmaps = true;
+      res(t);
+    }, undefined, rej);
+  });
+
+  // Single grayscale detail texture, tiled across the world. Used for a
+  // close-range "grit" multiplier that breaks up the macro tile repeat under
+  // the player. One tap, one sampler, mirrored-repeat handles tiling.
+  const loadDetail = url => new Promise((res, rej) => {
+    texLoader.load(url, t => {
+      t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping;
+      t.colorSpace = THREE.NoColorSpace;
+      t.minFilter = THREE.LinearMipmapLinearFilter;
+      t.magFilter = THREE.LinearFilter;
+      t.anisotropy = maxAniso;
+      t.generateMipmaps = true;
+      res(t);
+    }, undefined, rej);
+  });
+
   const [tRock, tGrass, tGravel, tSand, tRipBed, tRockyZ, tSandyW, tDefaultNormal,
-         nRock, nGrass, nGravel, nSand, nRipBed, nRockyZ, nSandyW] = await Promise.all([
+         normalAtlas, groundDetail] = await Promise.all([
     loadDiffuse('/assets/ground/rock.png'),
     loadDiffuse('/assets/ground/grassdry.png'),
     loadDiffuse('/assets/ground/gravel.png'),
@@ -68,13 +97,9 @@ export async function loadGroundTextures(renderer) {
     loadDiffuse('/assets/ground/rocky-zone.png'),
     loadDiffuse('/assets/ground/sandywash.png'),
     loadDiffuse('/assets/ground/normal.png'),
-    loadAtlasCell('/assets/ground/rocknormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/grassdrynormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/gravelnormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/sandnormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/riparianbednormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/rockynormals.png', 1, 0),
-    loadAtlasCell('/assets/ground/sandywashnormals.png', 1, 0),
+    // 4×2 atlas of the 7 per-material normal maps. One sampler.
+    loadAtlas('/assets/ground/normal-atlas.png'),
+    loadDetail('/assets/ground/ground-detail.png'),
   ]);
 
   return {
@@ -82,10 +107,8 @@ export async function loadGroundTextures(renderer) {
       rock: tRock, grass: tGrass, gravel: tGravel, sand: tSand,
       riparianbed: tRipBed, rockyZone: tRockyZ, sandyWash: tSandyW,
     },
-    normals: {
-      rock: nRock, grass: nGrass, gravel: nGravel, sand: nSand,
-      riparianbed: nRipBed, rockyZone: nRockyZ, sandyWash: nSandyW,
-    },
+    normalAtlas,
+    groundDetail,
     defaultNormal: tDefaultNormal
   };
 }

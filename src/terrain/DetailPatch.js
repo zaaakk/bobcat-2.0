@@ -70,6 +70,10 @@ export function createDetailPatch({
     vertexShader: TERRAIN_VERT,
     fragmentShader: TERRAIN_FRAG,
     defines: { IS_PATCH: 1 },
+    extensions: {
+      derivatives: true,
+      shaderTextureLOD: true,
+    },
     side: THREE.FrontSide,
     fog: false,
     // Strong depth bias so the patch always wins over the base mesh in the
