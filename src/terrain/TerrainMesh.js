@@ -32,11 +32,13 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     // tile offsets are constants in the fragment shader.
     uNormalAtlas:  { value: normalAtlas || normalTex },
     uHasNormalAtlas: { value: normalAtlas ? 1.0 : 0.0 },
+    uNormalAtlasGutter: { value: 2.0 / 256.0 },
     // Single grayscale detail texture, tiled across the world. Multiplied
     // into the splat-blended albedo at close range to break up the macro
     // tile repeat. One sampler, one tap, no atlas math.
     uGroundDetail:    { value: groundDetail || normalTex },
     uHasGroundDetail: { value: groundDetail ? 1.0 : 0.0 },
+    uDetailTexSize:   { value: new THREE.Vector2(groundDetail?.image?.width || 256, groundDetail?.image?.height || 256) },
     uDetailStrength:  { value: 1.50 },  // how much to lean into it (0=off, 1=full)
     uDetailTileSize:  { value: 3.95 },  // metres per detail tile repeat
     uDetailFadeNear:  { value: 1.0 },   // m — full strength
@@ -67,6 +69,11 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uExposure:     { value: 1.18 },      // pre-fog brightness lift on the lit albedo
     uDebugTerrainGrade: { value: 1.0 },
     uDebugRawFarFog: { value: 0.0 },
+    uDebugGroundDetail: { value: 1.0 },
+    uDebugDetailAA: { value: 1.0 },
+    uDebugTextureContrast: { value: 1.0 },
+    uDebugFarBlend: { value: 1.0 },
+    uDebugPatchDither: { value: 0.0 },
     uLanternPos:   { value: new THREE.Vector3() },
     uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
@@ -349,8 +356,10 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform sampler2D uTexSandyW;
   uniform sampler2D uNormalAtlas;
   uniform float uHasNormalAtlas;
+  uniform float uNormalAtlasGutter;
   uniform sampler2D uGroundDetail;
   uniform float uHasGroundDetail;
+  uniform vec2 uDetailTexSize;
   uniform float uDetailStrength;
   uniform float uDetailTileSize;
   uniform float uDetailFadeNear;
@@ -371,6 +380,11 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform float uExposure;
   uniform float uDebugTerrainGrade;
   uniform float uDebugRawFarFog;
+  uniform float uDebugGroundDetail;
+  uniform float uDebugDetailAA;
+  uniform float uDebugTextureContrast;
+  uniform float uDebugFarBlend;
+  uniform float uDebugPatchDither;
   uniform vec3 uLanternPos;
   uniform vec3 uLanternColor;
   uniform float uLanternRange;
@@ -405,7 +419,10 @@ export const TERRAIN_FRAG = /* glsl */`
       // to the ground rather than reading as an overlay on the monitor. No
       // floor() — we want per-pixel speckle, not quantized world cells, or
       // each cell discards as a chunky patch instead of a fine dot.
-      if (ditherHash(worldXZ * 73.0) > fadeIn) {
+      if (uDebugPatchDither > 0.5 && ditherHash(worldXZ * 73.0) > fadeIn) {
+        discard;
+      }
+      if (uDebugPatchDither < 0.5 && fadeIn < 0.5) {
         discard;
       }
     #endif
@@ -434,7 +451,7 @@ export const TERRAIN_FRAG = /* glsl */`
     vec3 cRipBed = texture2D(uTexRipBed, tileUv).rgb;
     vec3 cRockyZ = texture2D(uTexRockyZ, tileUv).rgb;
     vec3 cSandyW = texture2D(uTexSandyW, tileUv).rgb;
-    if (uTextureQuality > 1.5) {
+    if (uTextureQuality > 1.5 && uDebugFarBlend > 0.5) {
       cRock   = mix(cRock,   texture2D(uTexRock,   tileUvFar).rgb, farBlend);
       cGrass  = mix(cGrass,  texture2D(uTexGrass,  tileUvFar).rgb, farBlend);
       cGravel = mix(cGravel, texture2D(uTexGravel, tileUvFar).rgb, farBlend);
@@ -444,15 +461,17 @@ export const TERRAIN_FRAG = /* glsl */`
       cSandyW = mix(cSandyW, texture2D(uTexSandyW, tileUvFar).rgb, farBlend);
     }
 
-    // Sharpen each tile's contrast — pushes "small rocks, light/dark breakup"
-    // visible in the source PNGs into the rendered surface.
-    cRock   = clamp((cRock   - 0.5) * 1.32 + 0.5, 0.0, 1.0);
-    cGrass  = clamp((cGrass  - 0.5) * 1.18 + 0.5, 0.0, 1.0);
-    cGravel = clamp((cGravel - 0.5) * 1.28 + 0.5, 0.0, 1.0);
-    cSand   = clamp((cSand   - 0.5) * 1.10 + 0.5, 0.0, 1.0);
-    cRipBed = clamp((cRipBed - 0.5) * 1.30 + 0.5, 0.0, 1.0);
-    cRockyZ = clamp((cRockyZ - 0.5) * 1.28 + 0.5, 0.0, 1.0);
-    cSandyW = clamp((cSandyW - 0.5) * 1.18 + 0.5, 0.0, 1.0);
+    if (uDebugTextureContrast > 0.5) {
+      // Sharpen each tile's contrast — pushes "small rocks, light/dark breakup"
+      // visible in the source PNGs into the rendered surface.
+      cRock   = clamp((cRock   - 0.5) * 1.32 + 0.5, 0.0, 1.0);
+      cGrass  = clamp((cGrass  - 0.5) * 1.18 + 0.5, 0.0, 1.0);
+      cGravel = clamp((cGravel - 0.5) * 1.28 + 0.5, 0.0, 1.0);
+      cSand   = clamp((cSand   - 0.5) * 1.10 + 0.5, 0.0, 1.0);
+      cRipBed = clamp((cRipBed - 0.5) * 1.30 + 0.5, 0.0, 1.0);
+      cRockyZ = clamp((cRockyZ - 0.5) * 1.28 + 0.5, 0.0, 1.0);
+      cSandyW = clamp((cSandyW - 0.5) * 1.18 + 0.5, 0.0, 1.0);
+    }
 
     // Chunky splat: bias each weight toward 0 or 1 so transitions between
     // ground types read as crisp boundaries instead of soft watercolor mixes.
@@ -483,18 +502,21 @@ export const TERRAIN_FRAG = /* glsl */`
     // Use explicit distance LOD instead of implicit screen-space derivatives:
     // near Nyquist, the implicit per-triangle mip choice beats against the
     // terrain mesh and creates curved smear bands.
-    float detailFade = uHasGroundDetail * uDetailStrength
+    float detailFade = uHasGroundDetail * uDebugGroundDetail * uDetailStrength
                      * (1.0 - smoothstep(uDetailFadeNear, uDetailFadeFar, distView));
     if (detailFade > 0.001) {
       vec2 detailUv = worldXZ / max(uDetailTileSize, 0.001);
-      float detailFootprint = max(length(dFdx(detailUv)), length(dFdy(detailUv)));
-      float detailAlias = smoothstep(0.018, 0.055, detailFootprint);
-      float detailAa = clamp(uDetailAaStrength, 0.0, 2.0);
+      float detailFootprint = max(length(dFdx(detailUv * uDetailTexSize)), length(dFdy(detailUv * uDetailTexSize)));
+      float detailAlias = clamp(log2(max(detailFootprint, 1.0)) - 1.0, 0.0, 1.0);
+      float detailAa = clamp(uDetailAaStrength * uDebugDetailAA, 0.0, 2.0);
       detailFade *= clamp(1.0 - detailAlias * detailAa, 0.0, 1.0);
+      float footprintLod = log2(max(detailFootprint, 1.0));
+      float distanceLod = log2(max(distView, 1.0) / max(uDetailTileSize, 0.25));
+      float effectiveMipBias = mix(uDetailMipBias, max(uDetailMipBias, 0.0), detailAlias);
       float detailLod = clamp(
-        log2(max(distView, 1.0) / max(uDetailTileSize, 0.25))
-          + uDetailMipBias
-          + detailAlias * detailAa * 2.0,
+        max(distanceLod, footprintLod)
+          + effectiveMipBias
+          + detailAlias * detailAa * 1.5,
         0.0,
         7.0
       );
@@ -516,7 +538,8 @@ export const TERRAIN_FRAG = /* glsl */`
     vec2 nTs = vec2(0.25, 0.50);
     vec2 nDUVx = dFdx(tileUv) * nTs;
     vec2 nDUVy = dFdy(tileUv) * nTs;
-    vec2 nLocal = fract(tileUv) * nTs;
+    vec2 nLocal01 = clamp(fract(tileUv), vec2(uNormalAtlasGutter), vec2(1.0 - uNormalAtlasGutter));
+    vec2 nLocal = nLocal01 * nTs;
     vec3 nRock   = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.00, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
     vec3 nGrass  = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.25, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);
     vec3 nGravel = normalEnabled > 0.5 ? texture2DGradEXT(uNormalAtlas, nLocal + vec2(0.50, 0.00), nDUVx, nDUVy).rgb * 2.0 - 1.0 : vec3(0.0, 0.0, 1.0);

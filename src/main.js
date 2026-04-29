@@ -232,6 +232,11 @@ async function main() {
             renderSettings.auto = !renderSettings.auto;
             autoScaleBtn.textContent = `Auto render scale: ${autoScaleMode()}`;
           });
+          panelButton(el, 'Diagnostic 100%', () => {
+            renderSettings.auto = false;
+            applyRenderScale(1.0);
+            el.parentElement.querySelector('.dbg-tab.active').click();
+          });
           panelButton(el, 'Reset', () => {
             nightVision.uniforms.uSaturation.value = 0.9;
             nightVision.uniforms.uBrightness.value = 1.1;
@@ -387,6 +392,11 @@ async function main() {
             u.uTerrainNormals.value = u.uTerrainNormals.value > 0.5 ? 0.0 : 1.0;
             terrainNormalsBtn.textContent = `Terrain normals: ${terrainNormalsMode()}`;
           });
+          const flatAlbedoMode = () => u.uTextureQuality.value < 0.5 ? 'ON' : 'OFF';
+          const flatAlbedoBtn = panelButton(el, `Flat albedo: ${flatAlbedoMode()}`, () => {
+            u.uTextureQuality.value = u.uTextureQuality.value < 0.5 ? 2.0 : 0.0;
+            flatAlbedoBtn.textContent = `Flat albedo: ${flatAlbedoMode()}`;
+          });
           panelRow(el, {
             label: 'Normal fade near', min: 0, max: 400, step: 5,
             value: u.uNormalFadeNear.value,
@@ -431,6 +441,9 @@ async function main() {
             u.uTerrainNormals.value = 1.0;
             u.uNormalFadeNear.value = 90.0;
             u.uNormalFadeFar.value = 360.0;
+            u.uDebugTextureContrast.value = 1.0;
+            u.uDebugFarBlend.value = 1.0;
+            u.uDebugPatchDither.value = 0.0;
             u.uMaskLo.value = 0.20;
             u.uMaskHi.value = 0.55;
             u.uBenchMaskLo.value = 0.24;
@@ -518,6 +531,31 @@ async function main() {
             value: u.uDetailAaStrength.value,
             onInput: v => u.uDetailAaStrength.value = v
           });
+          const groundDetailMode = () => u.uDebugGroundDetail.value > 0.5 ? 'ON' : 'OFF';
+          const groundDetailBtn = panelButton(el, `Ground detail: ${groundDetailMode()}`, () => {
+            u.uDebugGroundDetail.value = u.uDebugGroundDetail.value > 0.5 ? 0.0 : 1.0;
+            groundDetailBtn.textContent = `Ground detail: ${groundDetailMode()}`;
+          });
+          const detailAaMode = () => u.uDebugDetailAA.value > 0.5 ? 'ON' : 'OFF';
+          const detailAaBtn = panelButton(el, `Detail AA guard: ${detailAaMode()}`, () => {
+            u.uDebugDetailAA.value = u.uDebugDetailAA.value > 0.5 ? 0.0 : 1.0;
+            detailAaBtn.textContent = `Detail AA guard: ${detailAaMode()}`;
+          });
+          const textureContrastMode = () => u.uDebugTextureContrast.value > 0.5 ? 'ON' : 'OFF';
+          const textureContrastBtn = panelButton(el, `Texture contrast: ${textureContrastMode()}`, () => {
+            u.uDebugTextureContrast.value = u.uDebugTextureContrast.value > 0.5 ? 0.0 : 1.0;
+            textureContrastBtn.textContent = `Texture contrast: ${textureContrastMode()}`;
+          });
+          const farBlendMode = () => u.uDebugFarBlend.value > 0.5 ? 'ON' : 'OFF';
+          const farBlendBtn = panelButton(el, `Far blend: ${farBlendMode()}`, () => {
+            u.uDebugFarBlend.value = u.uDebugFarBlend.value > 0.5 ? 0.0 : 1.0;
+            farBlendBtn.textContent = `Far blend: ${farBlendMode()}`;
+          });
+          const patchDitherMode = () => u.uDebugPatchDither.value > 0.5 ? 'ON' : 'OFF';
+          const patchDitherBtn = panelButton(el, `Patch dither: ${patchDitherMode()}`, () => {
+            u.uDebugPatchDither.value = u.uDebugPatchDither.value > 0.5 ? 0.0 : 1.0;
+            patchDitherBtn.textContent = `Patch dither: ${patchDitherMode()}`;
+          });
           if (splat) {
             const p = splat.params;
             const slider = (label, key, min, max, step) => panelRow(el, {
@@ -554,6 +592,11 @@ async function main() {
               u.uDetailFadeFar.value = 10.0;
               u.uDetailMipBias.value = -1.0;
               u.uDetailAaStrength.value = 1.0;
+              u.uDebugGroundDetail.value = 1.0;
+              u.uDebugDetailAA.value = 1.0;
+              u.uDebugTextureContrast.value = 1.0;
+              u.uDebugFarBlend.value = 1.0;
+              u.uDebugPatchDither.value = 0.0;
               el.parentElement.querySelector('.dbg-tab.active').click();
             });
           }

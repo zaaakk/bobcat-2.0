@@ -60,16 +60,54 @@ export async function loadGroundTextures(renderer) {
     img.src = url;
   });
 
-  const loadAtlas = (url, { srgb = false } = {}) => new Promise((res, rej) => {
-    texLoader.load(url, t => {
-      t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
-      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-      t.minFilter = THREE.LinearMipmapLinearFilter;
-      t.magFilter = THREE.LinearFilter;
-      t.anisotropy = maxAniso;
-      t.generateMipmaps = true;
-      res(t);
-    }, undefined, rej);
+  const loadAtlas = (url, { srgb = false, gridX = 1, gridY = 1, gutter = 0 } = {}) => new Promise((res, rej) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      let source = img;
+      if (gutter > 0 && gridX > 1 && gridY > 1) {
+        const cellW = img.width / gridX;
+        const cellH = img.height / gridY;
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const ctx = c.getContext('2d');
+
+        for (let y = 0; y < gridY; y++) {
+          for (let x = 0; x < gridX; x++) {
+            const sx = x * cellW;
+            const sy = y * cellH;
+            const dx = sx + gutter;
+            const dy = sy + gutter;
+            const dw = cellW - gutter * 2;
+            const dh = cellH - gutter * 2;
+
+            ctx.drawImage(img, sx, sy, cellW, cellH, dx, dy, dw, dh);
+            ctx.drawImage(img, sx, sy, cellW, 1, dx, sy, dw, gutter);
+            ctx.drawImage(img, sx, sy + cellH - 1, cellW, 1, dx, sy + cellH - gutter, dw, gutter);
+            ctx.drawImage(img, sx, sy, 1, cellH, sx, dy, gutter, dh);
+            ctx.drawImage(img, sx + cellW - 1, sy, 1, cellH, sx + cellW - gutter, dy, gutter, dh);
+            ctx.drawImage(img, sx, sy, 1, 1, sx, sy, gutter, gutter);
+            ctx.drawImage(img, sx + cellW - 1, sy, 1, 1, sx + cellW - gutter, sy, gutter, gutter);
+            ctx.drawImage(img, sx, sy + cellH - 1, 1, 1, sx, sy + cellH - gutter, gutter, gutter);
+            ctx.drawImage(img, sx + cellW - 1, sy + cellH - 1, 1, 1, sx + cellW - gutter, sy + cellH - gutter, gutter, gutter);
+          }
+        }
+        source = c;
+      }
+
+      const tex = new THREE.CanvasTexture(source);
+      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.anisotropy = maxAniso;
+      tex.generateMipmaps = true;
+      tex.needsUpdate = true;
+      res(tex);
+    };
+    img.onerror = rej;
+    img.src = url;
   });
 
   // Single grayscale detail texture, tiled across the world. Used for a
@@ -98,7 +136,7 @@ export async function loadGroundTextures(renderer) {
     loadDiffuse('/assets/ground/sandywash.png'),
     loadDiffuse('/assets/ground/normal.png'),
     // 4×2 atlas of the 7 per-material normal maps. One sampler.
-    loadAtlas('/assets/ground/normal-atlas.png'),
+    loadAtlas('/assets/ground/normal-atlas.png', { gridX: 4, gridY: 2, gutter: 2 }),
     loadDetail('/assets/ground/ground-detail.png'),
   ]);
 
