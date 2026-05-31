@@ -32,7 +32,7 @@ export function createDebugMenu({ panels = [] } = {}) {
   const style = document.createElement('style');
   style.textContent = `
     #debug-menu .dbg-frame {
-      background: linear-gradient(180deg, #2a2418 0%, #15110b 100%);
+      background: #1f1a10;
       border: 3px solid #0a0805;
       box-shadow:
         inset 0 0 0 1px #4f3a26,
@@ -48,7 +48,7 @@ export function createDebugMenu({ panels = [] } = {}) {
       font-size: 16px; letter-spacing: 0.3em;
       color: #b39568; text-shadow: 1px 1px 0 #000;
       border-bottom: 2px solid #0a0805;
-      background: linear-gradient(180deg, #1a2e6b 0%, #15110b 80%);
+      background: #1a2e6b;
     }
     #debug-menu .dbg-body { display: flex; }
     #debug-menu .dbg-tabs {
@@ -66,7 +66,7 @@ export function createDebugMenu({ panels = [] } = {}) {
     }
     #debug-menu .dbg-tab.active {
       color: #f0e6d0;
-      background: linear-gradient(180deg, #4e302a 0%, #15110b 100%);
+      background: #2e1f1a;
       box-shadow: inset 3px 0 0 0 #9c1a1a;
     }
     #debug-menu .dbg-panel {
@@ -112,7 +112,7 @@ export function createDebugMenu({ panels = [] } = {}) {
       padding: 6px 14px;
       font-weight: 800; font-size: 11px; letter-spacing: 0.2em;
       color: #f0e6d0; text-transform: uppercase;
-      background: linear-gradient(180deg, #2a2418 0%, #15110b 100%);
+      background: #1f1a10;
       border: 2px solid #0a0805;
       box-shadow:
         inset 0 0 0 1px #4f3a26,

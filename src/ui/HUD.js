@@ -1,144 +1,397 @@
 /**
- * HUD: compass strip, minimap rendering, status updates.
- * The UI elements are declared in index.html — this module just animates them.
+ * HUD built on the sprite atlas in /assets/ui_spritesheet.png.
  *
- * Minimap: the canvas is rendered once at full DEM extent (one hillshade); a
- * "pan" layer wrapping it gets translated each frame so the player sits at
- * the visible centre. Water pools are added as positioned dots inside the
- * pan layer so they pan/zoom together with the canvas.
+ * Layout:
+ *   - top-center: fixed dial (empty bezel + cardinal letters around it) with a
+ *     3D-tilted arrow inside that rotates with player yaw. The dial does not
+ *     rotate; only the arrow does, and it's rotated within a tilted plane so
+ *     it reads as a tabletop compass needle viewed from above.
+ *   - top-left:  three lines of sprite-font text (no panel backgrounds).
+ *   - top-right: sprite-font "FPS 060" (no panel background).
+ *   - bottom-left: three icon-tagged status bars (star=name, $=area, i=coords).
+ *   - bottom-right: circular minimap inside the empty dial frame; the existing
+ *     hillshade canvas is clipped to a circle and panned each frame.
+ *   - bottom-center: action prompt — sprite-font text only, no panel.
+ *
+ * The sprite-font has no lowercase glyphs — all text is uppercased before
+ * rendering (renderText handles that for A-Z).
  */
-export function createHUD({ dem, water }) {
-  const compassStrip = document.getElementById('compass-strip');
-  const minimapEl = document.getElementById('minimap');
-  const minimapPan = document.getElementById('minimap-pan');
-  const minimapCanvas = document.querySelector('#minimap canvas');
-  const minimapCtx = minimapCanvas.getContext('2d');
-  const minimapMarker = document.getElementById('minimap-marker');
-  const fpsReadout = document.getElementById('fps-readout');
 
-  // Visible window in metres on the minimap. Smaller = more zoomed in; the
-  // window stays centred on the player so most of what's visible is the
-  // local terrain. ~5km diameter gives a sense of distance without forcing
-  // the player to memorise the whole 21km map.
+import { loadSpriteManifest, spriteEl, spriteBox, sheetInfo, renderText, setText } from './sprite.js';
+import { createCompassArrow3D } from './CompassArrow3D.js';
+
+let manifestPromise = null;
+export function ensureSpritesLoaded() {
+  if (!manifestPromise) manifestPromise = loadSpriteManifest();
+  return manifestPromise;
+}
+
+const BLUE_FILL = '#3c6193';
+const PANEL_DARK = '#26211f';
+const GOLD = '#c0a366';
+
+/* ----------------------------- loading screen ----------------------------- */
+
+let loadingState = { bar: null, status: null, queued: [] };
+
+export function setLoadingProgress(t, status) {
+  if (!loadingState.bar) { loadingState.queued.push([t, status]); return; }
+  loadingState.bar.style.width = `${Math.max(0, Math.min(1, t)) * 100}%`;
+  if (status && loadingState.status) {
+    setText(loadingState.status, status.toUpperCase(), { capPx: 10, letterSpacing: 2 });
+  }
+}
+
+export function hideLoading() {
+  const el = document.getElementById('loading');
+  if (el) {
+    el.classList.add('hidden');
+    setTimeout(() => el.remove(), 700);
+  }
+}
+
+export function initLoadingScreen() {
+  const el = document.getElementById('loading');
+  if (!el) return;
+  el.innerHTML = '';
+
+  const title = document.createElement('div');
+  title.style.cssText = 'margin-bottom: 32px;';
+  title.appendChild(renderText('BOBCAT SIMULATOR', { capPx: 32, letterSpacing: 4 }));
+  el.appendChild(title);
+
+  const barWrap = document.createElement('div');
+  barWrap.style.cssText = `
+    width: 360px; height: 22px;
+    background: ${PANEL_DARK};
+    border: 2px solid #100c0a;
+    padding: 2px;
+    position: relative;
+  `;
+  const barFill = document.createElement('div');
+  barFill.style.cssText = `
+    width: 0%; height: 100%;
+    background: ${BLUE_FILL};
+    transition: width 0.25s linear;
+  `;
+  barWrap.appendChild(barFill);
+  el.appendChild(barWrap);
+  loadingState.bar = barFill;
+
+  const status = document.createElement('div');
+  status.style.cssText = 'margin-top: 18px; height: 14px;';
+  el.appendChild(status);
+  loadingState.status = status;
+
+  for (const [t, s] of loadingState.queued) setLoadingProgress(t, s);
+  loadingState.queued = [];
+}
+
+/* --------------------------------- helpers -------------------------------- */
+
+/**
+ * Build a status widget: icon-plate sprite + sprite-font text inside the
+ * dark slot. The slot starts ~18% from the left.
+ */
+function makeStatusWidget(spriteName, text, { scale = 0.5, capPx = 12 } = {}) {
+  const wrap = document.createElement('div');
+  wrap.style.position = 'relative';
+  wrap.style.display = 'inline-block';
+
+  const bg = spriteEl(spriteName, { scale });
+  wrap.appendChild(bg);
+
+  const b = spriteBox(spriteName);
+  const slotLeft = Math.round(b.w * 0.18 * scale);
+  const slotW = Math.round(b.w * scale) - slotLeft;
+  const slotH = Math.round(b.h * scale);
+
+  const txt = document.createElement('div');
+  txt.style.cssText = `
+    position: absolute; left: ${slotLeft + 8}px; top: 0; width: ${slotW - 16}px; height: ${slotH}px;
+    display: flex; align-items: center;
+    color: ${GOLD};
+  `;
+  txt.appendChild(renderText(text, { capPx, letterSpacing: 2 }));
+  wrap.appendChild(txt);
+  return wrap;
+}
+
+/** Plain sprite-font text with a hard 1px black drop shadow (no blur). */
+function plainText(text, { capPx = 16, letterSpacing = 3, color = GOLD, shadow = true } = {}) {
+  const el = document.createElement('div');
+  el.style.cssText = `
+    display: inline-block;
+    color: ${color};
+    ${shadow ? 'filter: drop-shadow(1px 1px 0 #000);' : ''}
+  `;
+  el.appendChild(renderText(text, { capPx, letterSpacing }));
+  return el;
+}
+
+/* ------------------------------- main HUD ------------------------------- */
+
+export function createHUD({ dem, water }) {
+  const hud = document.getElementById('hud');
+  hud.innerHTML = '';
+
+  // ── top-right compass: fixed dial + 3D rotating chevron ──────────────
+  // ~40% smaller than the original 0.62× scale → ~0.37×.
+  const COMPASS_SCALE = 0.37;
+  const dialBoxRef = spriteBox('dial_empty');
+  const compassW = Math.round(dialBoxRef.w * COMPASS_SCALE);
+  const compassH = Math.round(dialBoxRef.h * COMPASS_SCALE);
+
+  const compassWrap = document.createElement('div');
+  compassWrap.id = 'compass';
+  compassWrap.style.cssText = `
+    position: absolute; top: 14px; right: 14px;
+    width: ${compassW}px; height: ${compassH}px;
+    pointer-events: none;
+  `;
+
+  // Bezel ring (no letters, no arrow — clean disk)
+  const bezel = spriteEl('dial_empty', { scale: COMPASS_SCALE });
+  bezel.style.position = 'absolute';
+  bezel.style.left = '0';
+  bezel.style.top = '0';
+  compassWrap.appendChild(bezel);
+
+  // Cardinal letters fixed at compass points — just inside the bezel.
+  const cardR = compassW * 0.38;
+  const cx = compassW / 2, cy = compassH / 2;
+  function addCardinal(ch, angleRad) {
+    const x = cx + Math.sin(angleRad) * cardR;
+    const y = cy - Math.cos(angleRad) * cardR;
+    const lab = plainText(ch, { capPx: 18, letterSpacing: 0, color: '#e8d8b0', shadow: true });
+    lab.style.position = 'absolute';
+    lab.style.left = `${x}px`;
+    lab.style.top  = `${y}px`;
+    lab.style.transform = 'translate(-50%, -50%)';
+    compassWrap.appendChild(lab);
+  }
+  addCardinal('N', 0);
+  addCardinal('E', Math.PI / 2);
+  addCardinal('S', Math.PI);
+  addCardinal('W', -Math.PI / 2);
+
+  // 3D chevron arrow, centered inside the dial.
+  const arrowCanvasSize = Math.round(compassW * 0.65);
+  const compassArrow = createCompassArrow3D({ size: arrowCanvasSize });
+  compassArrow.canvas.style.position = 'absolute';
+  compassArrow.canvas.style.left = `${(compassW - arrowCanvasSize) / 2}px`;
+  compassArrow.canvas.style.top  = `${(compassH - arrowCanvasSize) / 2}px`;
+  compassArrow.canvas.style.pointerEvents = 'none';
+  compassWrap.appendChild(compassArrow.canvas);
+
+  hud.appendChild(compassWrap);
+
+  // ── top-left: help key hints (plain text, no backgrounds) ─────────────
+  const helpWrap = document.createElement('div');
+  helpWrap.style.cssText = `
+    position: absolute; top: 18px; left: 18px;
+    display: flex; flex-direction: column; gap: 8px;
+    pointer-events: none;
+  `;
+  helpWrap.appendChild(plainText('WASD  MOVE',   { capPx: 16, letterSpacing: 3 }));
+  helpWrap.appendChild(plainText('SHIFT  SPRINT', { capPx: 16, letterSpacing: 3 }));
+  helpWrap.appendChild(plainText('MOUSE  LOOK',  { capPx: 16, letterSpacing: 3 }));
+  hud.appendChild(helpWrap);
+
+  // ── FPS (plain text, just below the compass) ──────────────────────────
+  const fpsWrap = document.createElement('div');
+  fpsWrap.style.cssText = `
+    position: absolute; top: ${compassH + 22}px; right: 18px;
+    pointer-events: none;
+  `;
+  hud.appendChild(fpsWrap);
+  function setFps(n) {
+    const v = Number.isFinite(n) ? String(Math.round(n)).padStart(3, '0') : '000';
+    fpsWrap.innerHTML = '';
+    fpsWrap.appendChild(plainText(`FPS ${v}`, { capPx: 12, letterSpacing: 2 }));
+  }
+  setFps(0);
+
+  // ── bottom-left: profile icon + icon status widgets ──────────────────
+  const bottomLeft = document.createElement('div');
+  bottomLeft.style.cssText = `
+    position: absolute; bottom: 14px; left: 14px;
+    display: flex; align-items: flex-end; gap: 10px;
+    pointer-events: none;
+  `;
+
+  // Portrait icon — same flat panel treatment as the rest of the HUD.
+  const portrait = document.createElement('div');
+  portrait.style.cssText = `
+    width: 84px; height: 84px;
+    background: #14110d;
+    border: 2px solid #100c0a;
+    image-rendering: pixelated;
+    box-shadow: inset 0 0 0 1px #4a3a26;
+    flex: 0 0 auto;
+    overflow: hidden;
+  `;
+  const portraitImg = document.createElement('img');
+  portraitImg.src = '/assets/profile.png';
+  portraitImg.alt = 'bobcat';
+  portraitImg.style.cssText = `
+    width: 100%; height: 100%; object-fit: cover;
+    image-rendering: pixelated;
+  `;
+  portrait.appendChild(portraitImg);
+  bottomLeft.appendChild(portrait);
+
+  const statusWrap = document.createElement('div');
+  statusWrap.style.cssText = `
+    display: flex; flex-direction: column; gap: 6px;
+  `;
+  statusWrap.appendChild(makeStatusWidget('widget_star_bar', 'LYNX RUFUS', { scale: 0.62, capPx: 18 }));
+  statusWrap.appendChild(makeStatusWidget('widget_dollar_bar', 'PANDALE', { scale: 0.62, capPx: 18 }));
+  const coordsWidget = makeStatusWidget('widget_info_bar', 'N 30 W 101', { scale: 0.62, capPx: 18 });
+  statusWrap.appendChild(coordsWidget);
+  bottomLeft.appendChild(statusWrap);
+  hud.appendChild(bottomLeft);
+
+  const coordsText = coordsWidget.querySelector('div:last-child');
+
+  // ── bottom-right: circular minimap ────────────────────────────────────
+  const dialBox = spriteBox('dial_empty');
+  const minimapScale = 0.7;
+  const dialDispW = Math.round(dialBox.w * minimapScale);
+  const dialDispH = Math.round(dialBox.h * minimapScale);
+
+  const minimap = document.createElement('div');
+  minimap.id = 'minimap';
+  minimap.style.cssText = `
+    position: absolute; bottom: 14px; right: 14px;
+    width: ${dialDispW}px; height: ${dialDispH}px;
+    pointer-events: none;
+  `;
+  const innerD = Math.round(dialDispW * 0.78);
+  const innerInsetX = Math.round((dialDispW - innerD) / 2);
+  const innerInsetY = Math.round((dialDispH - innerD) / 2);
+
+  const clipDisk = document.createElement('div');
+  clipDisk.style.cssText = `
+    position: absolute; left: ${innerInsetX}px; top: ${innerInsetY}px;
+    width: ${innerD}px; height: ${innerD}px;
+    border-radius: 50%; overflow: hidden;
+    background: #14110d;
+  `;
+  const minimapPan = document.createElement('div');
+  minimapPan.id = 'minimap-pan';
+  minimapPan.style.cssText = 'position: absolute; left: 0; top: 0; will-change: transform;';
+  const minimapCanvas = document.createElement('canvas');
+  minimapCanvas.width = 640;
+  minimapCanvas.height = 640;
+  minimapCanvas.style.cssText = 'display: block; image-rendering: pixelated;';
+  minimapPan.appendChild(minimapCanvas);
+  clipDisk.appendChild(minimapPan);
+
+  const marker = document.createElement('div');
+  marker.id = 'minimap-marker';
+  marker.style.cssText = `
+    position: absolute; top: 50%; left: 50%;
+    width: 14px; height: 14px;
+    background: ${GOLD};
+    clip-path: polygon(50% 0%, 100% 100%, 50% 78%, 0% 100%);
+    transform: translate(-50%, -50%) rotate(0rad);
+    transform-origin: center center;
+    z-index: 2;
+  `;
+  clipDisk.appendChild(marker);
+  minimap.appendChild(clipDisk);
+
+  const dialFrame = spriteEl('dial_empty', { scale: minimapScale });
+  dialFrame.style.position = 'absolute';
+  dialFrame.style.left = '0';
+  dialFrame.style.top = '0';
+  dialFrame.style.pointerEvents = 'none';
+  minimap.appendChild(dialFrame);
+  hud.appendChild(minimap);
+
+  const minimapCtx = minimapCanvas.getContext('2d');
+  renderMinimap(minimapCtx, minimapCanvas, dem);
+
   const VIEW_DIAMETER_M = 5000;
-  const minimapSizePx = minimapEl.clientWidth || 168;
-  // Canvas displays at (worldWidth / VIEW_DIAMETER_M) × the minimap size, so
-  // VIEW_DIAMETER_M of world fills the visible window. Internal canvas
-  // resolution stays at its declared 640×640 — large enough that the zoomed
-  // hillshade reads sharp.
-  const canvasDisplaySize = (dem.worldWidth / VIEW_DIAMETER_M) * minimapSizePx;
+  const canvasDisplaySize = (dem.worldWidth / VIEW_DIAMETER_M) * innerD;
   minimapCanvas.style.width = canvasDisplaySize + 'px';
   minimapCanvas.style.height = canvasDisplaySize + 'px';
 
-  // Build a 720° compass strip (so the stripe never runs out as you spin).
-  // Each character spans 60px in CSS; full rotation = 360 * (60 / 30deg) … we'll
-  // simply repeat N/E/S/W three times and shift left/right based on yaw.
-  const points = ['N','NE','E','SE','S','SW','W','NW'];
-  const labels = [...points, ...points, ...points]; // 24 labels
-  compassStrip.innerHTML = labels.map(p => `<span>${p}</span>`).join('');
-  const stripWidth = 60 * labels.length;
-  compassStrip.style.width = `${stripWidth}px`;
-  // Each label = 45° of yaw → 60px CSS. So 1 rad = 60 / (Math.PI/4) ≈ 76.39 px.
-  const PX_PER_RAD = 60 / (Math.PI / 4);
-
-  // Pre-render a static minimap from the DEM (once).
-  renderMinimap(minimapCtx, minimapCanvas, dem);
-
-  // Drop a water-pool dot per pool into the pan layer. Sizes scale with the
-  // pool radius, but capped so big river pools don't dominate the minimap.
-  const waterDots = [];
   if (water && water.pools) {
     for (const p of water.pools) {
       const dot = document.createElement('div');
-      dot.className = 'minimap-water';
-      // Convert world-metres to display-pixels at the minimap's zoom.
-      const radiusPx = Math.max(2, Math.min(8, (p.r / VIEW_DIAMETER_M) * minimapSizePx * 2.5));
+      dot.style.position = 'absolute';
+      dot.style.background = '#4ea3c8';
+      dot.style.border = '1px solid #16384b';
+      dot.style.borderRadius = '50%';
+      const radiusPx = Math.max(2, Math.min(8, (p.r / VIEW_DIAMETER_M) * innerD * 2.5));
       dot.style.width = radiusPx + 'px';
       dot.style.height = radiusPx + 'px';
       dot.style.transform = 'translate(-50%, -50%)';
-      // Pool world-position → display pixel within the (canvasDisplaySize)
-      // pan layer. (u,v) are in 0..1 across the DEM extent.
       const u = (p.x / dem.worldWidth) + 0.5;
       const v = 1 - ((p.z / dem.worldHeight) + 0.5);
       dot.style.left = (u * canvasDisplaySize) + 'px';
       dot.style.top = (v * canvasDisplaySize) + 'px';
       minimapPan.appendChild(dot);
-      waterDots.push(dot);
     }
   }
 
-  // Action prompt that appears when the bobcat can interact with something
-  // nearby (water pools first, more later). Stamped panel with the same
-  // chiselled bevel as the rest of the HUD; lives at the bottom-centre.
+  // ── bottom-center: action prompt (plain text) ─────────────────────────
   const promptEl = document.createElement('div');
   promptEl.id = 'action-prompt';
-  promptEl.className = 'panel';
-  promptEl.style.cssText = [
-    'position:absolute',
-    'left:50%; bottom:28px',
-    'transform:translateX(-50%)',
-    'padding:10px 18px',
-    'font-family:Work Sans, sans-serif',
-    'font-weight:700; font-size:12px; letter-spacing:0.36em',
-    'color:var(--ui-tan)',
-    'text-transform:uppercase',
-    'text-shadow:1px 1px 0 #000',
-    'opacity:0; transition:opacity 0.18s ease',
-    'pointer-events:none',
-  ].join(';');
-  promptEl.textContent = 'DRINK [E]';
-  document.getElementById('hud').appendChild(promptEl);
+  promptEl.style.cssText = `
+    position: absolute; left: 50%; bottom: 28px;
+    transform: translateX(-50%);
+    opacity: 0; transition: opacity 0.18s ease;
+    pointer-events: none;
+  `;
+  hud.appendChild(promptEl);
 
+  let lastPrompt = null;
+
+  /* ------------------------------ frame update ------------------------- */
   function update({ playerYaw, playerPos, fps, prompt }) {
-    // Compass: when player faces +Z (yaw=0), 'N' should be centered.
-    // Strip is 220px wide. We position so middle index of stripe ('N' in second copy) sits centered minus yaw offset.
-    const centerOffset = -((points.length + 4) * 60 - 110); // start centered on second-block 'N'
-    compassStrip.style.left = `${centerOffset + playerYaw * PX_PER_RAD}px`;
+    // 3D arrow spins around vertical axis to match player yaw.
+    compassArrow.setYaw(playerYaw);
 
-    // Translate the pan layer so the player's world position lands at the
-    // minimap's visible centre. (u,v) are 0..1 across the DEM; scaling by
-    // canvasDisplaySize gives the player's pixel offset *within* the zoomed
-    // canvas, which we then negate and add half-minimap so the player ends
-    // up dead-centre in the overflow:hidden window.
     const u = (playerPos.x / dem.worldWidth) + 0.5;
     const v = 1 - ((playerPos.z / dem.worldHeight) + 0.5);
-    const tx = (minimapSizePx * 0.5) - (u * canvasDisplaySize);
-    const ty = (minimapSizePx * 0.5) - (v * canvasDisplaySize);
+    const tx = (innerD * 0.5) - (u * canvasDisplaySize);
+    const ty = (innerD * 0.5) - (v * canvasDisplaySize);
     minimapPan.style.transform = `translate(${tx}px, ${ty}px)`;
-    // Rotate the marker to match the bobcat's facing. yaw=0 → moves +Z =
-    // top of the minimap (north), so the default upward-pointing triangle
-    // is the correct rest orientation; CSS rotate is clockwise, which
-    // matches our world-yaw convention (yaw=π/2 → east → triangle right).
-    if (minimapMarker) {
-      minimapMarker.style.transform = `translate(-50%, -50%) rotate(${playerYaw}rad)`;
-    }
+    marker.style.transform = `translate(-50%, -50%) rotate(${playerYaw}rad)`;
 
-    if (fpsReadout && Number.isFinite(fps)) {
-      fpsReadout.textContent = String(Math.round(fps)).padStart(3, '0');
-    }
+    setFps(fps);
 
-    // Prompt: show when an interaction is available; fade out otherwise.
+    const lat = 30 + (playerPos.z / dem.worldHeight) * 0.5;
+    const lon = 101 + (playerPos.x / dem.worldWidth) * 0.5;
+    setText(coordsText, `N ${lat.toFixed(0)} W ${lon.toFixed(0)}`, { capPx: 18, letterSpacing: 2 });
+
     if (prompt) {
-      promptEl.textContent = prompt;
+      if (prompt !== lastPrompt) {
+        promptEl.innerHTML = '';
+        promptEl.appendChild(plainText(prompt, { capPx: 20, letterSpacing: 4 }));
+        lastPrompt = prompt;
+      }
       promptEl.style.opacity = '1';
     } else {
       promptEl.style.opacity = '0';
+      lastPrompt = null;
     }
   }
 
   return { update };
 }
 
-/**
- * Bake a top-down hillshade of the DEM into the minimap canvas.
- */
+/* ----------------------- minimap hillshade bake -------------------------- */
+
 function renderMinimap(ctx, canvas, dem) {
   const w = canvas.width, h = canvas.height;
   const img = ctx.createImageData(w, h);
   const data = img.data;
   const elevRange = Math.max(1, dem.maxZ - dem.minZ);
 
-  // sun direction (top-left lit)
   const sunX = -1, sunY = -1;
   const sunLen = Math.sqrt(sunX * sunX + sunY * sunY + 1);
   const sx = sunX / sunLen, sy = sunY / sunLen, sz = 1 / sunLen;
@@ -146,14 +399,12 @@ function renderMinimap(ctx, canvas, dem) {
   for (let j = 0; j < h; j++) {
     for (let i = 0; i < w; i++) {
       const u = i / w;
-      // Map canvas y top→bottom to dem y bottom→top (north up).
       const v = 1 - j / h;
       const dx = Math.min(dem.width - 1, Math.floor(u * dem.width));
       const dy = Math.min(dem.height - 1, Math.floor(v * dem.height));
       const z = dem.data[dy * dem.width + dx];
       const elevT = (z - dem.minZ) / elevRange;
 
-      // Slope from neighbours.
       const xL = Math.max(0, dx - 1), xR = Math.min(dem.width - 1, dx + 1);
       const yD = Math.max(0, dy - 1), yU = Math.min(dem.height - 1, dy + 1);
       const hL = dem.data[dy * dem.width + xL];
@@ -179,17 +430,3 @@ function renderMinimap(ctx, canvas, dem) {
   ctx.putImageData(img, 0, 0);
 }
 
-export function setLoadingProgress(t, status) {
-  const bar = document.getElementById('loading-bar');
-  const st = document.getElementById('loading-status');
-  if (bar) bar.style.width = `${Math.round(t * 100)}%`;
-  if (st && status) st.textContent = status;
-}
-
-export function hideLoading() {
-  const el = document.getElementById('loading');
-  if (el) {
-    el.classList.add('hidden');
-    setTimeout(() => el.remove(), 700);
-  }
-}

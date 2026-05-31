@@ -30,9 +30,10 @@ export function createBobcatSim({ pivot, support }) {
     gravity: 14.0,
     // Number of jumps remaining mid-air. Starts at maxJumps when grounded
     // and decrements with each Space press; resets on landing. Default
-    // maxJumps=2 → grounded jump + one mid-air "double-jump".
-    jumpsRemaining: 2,
-    maxJumps: 2,
+    // maxJumps=3 -> grounded jump + two mid-air jumps.
+    jumpsRemaining: 3,
+    maxJumps: 3,
+    infiniteJumps: false,
     onJumpStart: null,    // (pos, jumpsLeft) => void — main.js wires dust here
     onJumpLand: null,
     setGroundFn(fn) { groundFn = fn; },
@@ -109,11 +110,12 @@ export function createBobcatSim({ pivot, support }) {
     // Each press consumes one of jumpsRemaining. The first jump leaves the
     // ground; subsequent presses while airborne are double-jumps. The
     // second is slightly weaker so the bobcat doesn't rocket into the sky.
-    if (inputs.jumpPressed && state.jumpsRemaining > 0 && !state.isDrinking) {
-      const isFirst = state.jumpsRemaining === state.maxJumps;
+    const canJump = state.infiniteJumps || state.jumpsRemaining > 0;
+    if (inputs.jumpPressed && canJump && !state.isDrinking) {
+      const isFirst = !state.airborne || state.jumpsRemaining === state.maxJumps;
       state.airborne = true;
       state.vy = state.jumpInitialVy * (isFirst ? 1.0 : 0.85);
-      state.jumpsRemaining -= 1;
+      if (!state.infiniteJumps) state.jumpsRemaining -= 1;
       rig.playJump();
       if (state.onJumpStart) state.onJumpStart(state.position, state.jumpsRemaining);
     }

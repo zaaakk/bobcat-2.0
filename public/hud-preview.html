@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      html, body { margin:0; padding:0; background:#1a140c; min-height:100vh; }
+      /* Fake background gameworld */
+      body {
+        background:
+          radial-gradient(circle at 30% 60%, rgba(160,120,70,0.35) 0%, transparent 50%),
+          linear-gradient(180deg, #4a3520 0%, #1a140c 60%, #0a0805 100%);
+      }
+      #hud { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
+    </style>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <script type="module">
+      import { createHUD, ensureSpritesLoaded } from '/src/ui/HUD.js';
+      await ensureSpritesLoaded();
+      // Fake DEM + water for HUD construction
+      const fakeDem = {
+        width: 256, height: 256,
+        worldWidth: 21000, worldHeight: 21000,
+        pixelSizeX: 82, pixelSizeY: 82,
+        minZ: 400, maxZ: 1200,
+        data: new Float32Array(256 * 256).map(() => 800 + Math.random()*200),
+      };
+      const fakeWater = { pools: [
+        { x: 1000, z:  500, r: 50 },
+        { x: -2000, z: 1500, r: 80 },
+        { x: 3500, z: -1200, r: 30 },
+      ]};
+      const hud = createHUD({ dem: fakeDem, water: fakeWater });
+
+      // Animate yaw, prompt
+      let yaw = 0;
+      function tick() {
+        yaw += 0.005;
+        hud.update({
+          playerYaw: yaw,
+          playerPos: { x: Math.sin(yaw*0.3)*4000, y: 0, z: Math.cos(yaw*0.3)*3000 },
+          fps: 60,
+          prompt: (Math.sin(yaw*0.5) > 0) ? 'DRINK (E)' : null,
+        });
+        requestAnimationFrame(tick);
+      }
+      tick();
+    </script>
+  </body>
+</html>

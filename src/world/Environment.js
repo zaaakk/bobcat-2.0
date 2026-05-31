@@ -20,7 +20,7 @@ import * as THREE from 'three';
  *   coupled to per-shader uniform names; future weather state (wind, cloud
  *   coverage, precip) can extend env.state and consumers pull from there.
  */
-export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, lantern }) {
+export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill }) {
   // Non-uniform clock: daylight/twilight get more real time, while the below-
   // horizon half of the sun path remains at the old 120 seconds. This keeps
   // night from dragging out when we lengthen the day.
@@ -58,6 +58,7 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     ambientDay:     new THREE.Color('#ffffff'),
     ambientNight:   new THREE.Color('#a8b8d6')
   };
+  const bobcatFillTint = new THREE.Color('#fff7ea');
 
   // Live state — read by other systems each frame. Future weather fields
   // (wind vector, cloud cover, precip rate) will land here.
@@ -161,15 +162,23 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
 
     hemi.color.copy(state.hemiSky);
     hemi.groundColor.copy(state.hemiGround);
-    hemi.intensity = THREE.MathUtils.lerp(0.32, 0.42, dayT) + twilightBand * 0.06;
+    hemi.intensity = THREE.MathUtils.lerp(0.32, 0.56, dayT) + twilightBand * 0.08;
 
     ambient.color.copy(state.ambient);
-    ambient.intensity = THREE.MathUtils.lerp(0.14, 0.16, dayT) + nightT * 0.04;
+    ambient.intensity = THREE.MathUtils.lerp(0.14, 0.22, dayT) + nightT * 0.04;
 
     renderer.toneMappingExposure = THREE.MathUtils.lerp(0.82, 1.0, dayT) + twilightBand * 0.04;
 
     if (lantern) {
       lantern.intensity = nightT * 6.5 + twilightBand * 1.2;
+    }
+    if (bobcatFill) {
+      bobcatFill.color.copy(state.sunColor).lerp(bobcatFillTint, 0.55);
+      bobcatFill.intensity = dayT * 2.0 + twilightBand * 0.55;
+    }
+    if (bobcatTopFill) {
+      bobcatTopFill.color.copy(state.hemiSky).lerp(bobcatFillTint, 0.35);
+      bobcatTopFill.intensity = dayT * 2.8 + twilightBand * 0.75;
     }
   }
 

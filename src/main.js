@@ -11,7 +11,7 @@ import { loadBobcat } from './player/Bobcat.js';
 import { chooseSpawnPoint } from './player/Spawn.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
-import { createHUD, setLoadingProgress, hideLoading } from './ui/HUD.js';
+import { createHUD, setLoadingProgress, hideLoading, ensureSpritesLoaded, initLoadingScreen } from './ui/HUD.js';
 import { createDebugMenu, panelRow, panelButton } from './ui/DebugMenu.js';
 
 main().catch(err => {
@@ -20,6 +20,11 @@ main().catch(err => {
 });
 
 async function main() {
+  // Sprites must load before any UI renders (loading screen uses sprite font).
+  await ensureSpritesLoaded();
+  initLoadingScreen();
+  const BOBCAT_LIGHT_LAYER = 1;
+
   // ---------- renderer ----------
   const canvas = document.createElement('canvas');
   document.getElementById('app').appendChild(canvas);
@@ -49,6 +54,7 @@ async function main() {
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 25000);
+  camera.layers.enable(BOBCAT_LIGHT_LAYER);
 
   window.addEventListener('resize', () => {
     applyRenderScale(renderSettings.scale);
@@ -81,6 +87,7 @@ async function main() {
   bobcat.position.set(spawn.x, spawn.y, spawn.z);
   bobcat.yaw = spawn.yaw;
   bobcat.pivot.rotation.y = spawn.yaw;
+  bobcat.object.traverse(o => o.layers.enable(BOBCAT_LIGHT_LAYER));
   scene.add(bobcat.object);
 
   if (!sp.has('noplants') && world.plants.prewarm) {
@@ -601,6 +608,117 @@ async function main() {
             });
           }
         }
+      },
+      {
+        id: 'animation', label: 'Animation',
+        render(el) {
+          panelRow(el, {
+            label: 'Sprint crop', min: 0, max: 0.4, step: 0.005,
+            value: bobcat.getRunCrop ? bobcat.getRunCrop() : 0,
+            format: v => `${Math.round(v * 100)}%`,
+            onInput: v => bobcat.setRunCrop && bobcat.setRunCrop(v)
+          });
+          panelRow(el, {
+            label: 'Sprint speed', min: 0.1, max: 1.5, step: 0.05,
+            value: bobcat.getRunTimeScale ? bobcat.getRunTimeScale() : 1.0,
+            format: v => v.toFixed(2),
+            onInput: v => bobcat.setRunTimeScale && bobcat.setRunTimeScale(v)
+          });
+          const mirrorLabel = () => bobcat.getMirrorEnabled() ? 'Mirror: ON' : 'Mirror: OFF';
+          const mirrorBtn = panelButton(el, mirrorLabel(), () => {
+            bobcat.setMirrorEnabled(!bobcat.getMirrorEnabled());
+            mirrorBtn.textContent = mirrorLabel();
+          });
+          const leadLabel = () => {
+            const l = bobcat.getMirrorLeadLock();
+            if (l === 0) return 'Lead lock: AUTO';
+            if (l > 0)  return 'Lead lock: ORIGINAL';
+            return 'Lead lock: MIRROR';
+          };
+          const leadBtn = panelButton(el, leadLabel(), () => {
+            const cur = bobcat.getMirrorLeadLock();
+            const next = cur === 0 ? 1 : cur > 0 ? -1 : 0;
+            bobcat.setMirrorLeadLock(next);
+            leadBtn.textContent = leadLabel();
+          });
+
+          // ---- Mirror exclude pattern ----
+          // Regex matched against bone names (without .L/.R suffix removed).
+          // Matching bones are kept at their original (un-mirrored) values.
+          // Defaults exclude face. See console at load for available families.
+          const excludeRow = document.createElement('div');
+          excludeRow.className = 'dbg-row';
+          excludeRow.innerHTML = `
+            <div class="dbg-label" style="margin-bottom:4px;">
+              <span>Mirror exclude (regex)</span>
+              <span style="font-size:9px; color:#7a6d52;">SEE CONSOLE FOR BONES</span>
+            </div>
+          `;
+          const excludeInput = document.createElement('input');
+          excludeInput.type = 'text';
+          excludeInput.value = bobcat.getMirrorExcludePattern ? bobcat.getMirrorExcludePattern() : '';
+          excludeInput.style.cssText = `
+            width: 100%; padding: 4px 6px;
+            background: #08060a; color: #f0e6d0;
+            border: 2px solid #0a0805;
+            box-shadow: inset 0 0 0 1px #4f3a26;
+            font-family: monospace; font-size: 11px;
+            outline: none;
+          `;
+          excludeInput.addEventListener('change', () => {
+            try { bobcat.setMirrorExcludePattern(excludeInput.value); }
+            catch (e) { console.warn('[debug] bad regex:', e.message); }
+          });
+          excludeRow.appendChild(excludeInput);
+          el.appendChild(excludeRow);
+
+          // ---- Scrub & per-frame skip diagnostics ----
+          const forceLabel = () => bobcat.getForceSprint() ? 'Force sprint: ON' : 'Force sprint: OFF';
+          const forceBtn = panelButton(el, forceLabel(), () => {
+            bobcat.setForceSprint(!bobcat.getForceSprint());
+            forceBtn.textContent = forceLabel();
+          });
+          const pauseLabel = () => bobcat.getPaused() ? 'Pause: ON' : 'Pause: OFF';
+          const pauseBtn = panelButton(el, pauseLabel(), () => {
+            bobcat.setPaused(!bobcat.getPaused());
+            pauseBtn.textContent = pauseLabel();
+          });
+
+          const frameCount = bobcat.getFrameCount() || 1;
+          let currentFrame = 0;
+          const frameRow = panelRow(el, {
+            label: 'Frame', min: 0, max: Math.max(0, frameCount - 1), step: 1,
+            value: 0,
+            format: v => `${Math.floor(v)} / ${frameCount - 1}`,
+            onInput: v => {
+              currentFrame = Math.floor(v);
+              bobcat.setRunTimeFraction(currentFrame / Math.max(1, frameCount - 1));
+              updateSkipBtn();
+            }
+          });
+          const skippedDiv = document.createElement('div');
+          skippedDiv.style.cssText = 'font-size: 10px; color: #b9aa8a; padding: 4px 0 8px; letter-spacing: 0.1em; word-wrap: break-word;';
+          const updateSkippedDiv = () => {
+            const list = bobcat.getSkippedFrames();
+            skippedDiv.textContent = `SKIPPED: ${list.length ? list.join(', ') : '(none)'}`;
+          };
+          const skipLabel = () => bobcat.isFrameSkipped(currentFrame)
+            ? `Unskip frame ${currentFrame} (both clips)`
+            : `Skip frame ${currentFrame} (both clips)`;
+          const skipBtn = panelButton(el, skipLabel(), () => {
+            bobcat.setFrameSkipped(currentFrame, !bobcat.isFrameSkipped(currentFrame));
+            updateSkipBtn();
+            updateSkippedDiv();
+          });
+          function updateSkipBtn() { skipBtn.textContent = skipLabel(); }
+          panelButton(el, 'Clear all skipped', () => {
+            bobcat.clearSkippedFrames();
+            updateSkipBtn();
+            updateSkippedDiv();
+          });
+          el.appendChild(skippedDiv);
+          updateSkippedDiv();
+        }
       }
     ]
   });
@@ -625,9 +743,21 @@ async function main() {
   lantern.castShadow = false;
   scene.add(lantern);
 
+  // Daylight fill for the bobcat. Terrain/plants are shader-lit separately;
+  // this small local source keeps the animal readable when the sun is high or
+  // behind the camera-facing side without washing out the whole desert.
+  const bobcatFill = new THREE.PointLight(0xfff7ea, 0, 4.2, 1.45);
+  bobcatFill.castShadow = false;
+  bobcatFill.layers.set(BOBCAT_LIGHT_LAYER);
+  scene.add(bobcatFill);
+  const bobcatTopFill = new THREE.PointLight(0xddeeff, 0, 4.8, 1.35);
+  bobcatTopFill.castShadow = false;
+  bobcatTopFill.layers.set(BOBCAT_LIGHT_LAYER);
+  scene.add(bobcatTopFill);
+
   const environment = createEnvironment({
     renderer, sky, world,
-    sun, hemi, ambient, lantern
+    sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill
   });
   environment.update(0);
 
@@ -648,6 +778,7 @@ async function main() {
   let fpsAccum = 0, fpsFrames = 0;
   let displayFps = 60;
   let lastFootAt = 0;
+  const _lightVec = new THREE.Vector3();
 
   function frame() {
     const now = performance.now();
@@ -705,6 +836,22 @@ async function main() {
       bobcat.position.y + 1.6 + Math.sin(t * 1.4) * 0.05,
       bobcat.position.z
     );
+    {
+      const fillDir = _lightVec.subVectors(camera.position, bobcat.position);
+      fillDir.y = 0;
+      if (fillDir.lengthSq() < 1e-4) fillDir.set(0, 0, 1);
+      fillDir.normalize();
+      bobcatFill.position.set(
+        bobcat.position.x + fillDir.x * 0.9,
+        bobcat.position.y + 1.15,
+        bobcat.position.z + fillDir.z * 0.9
+      );
+    }
+    bobcatTopFill.position.set(
+      bobcat.position.x,
+      bobcat.position.y + 2.0,
+      bobcat.position.z
+    );
     // Terrain and plant shaders are custom (not Three.js standard materials),
     // so PointLight doesn't reach them automatically — push the lantern as
     // plain uniforms so the ground catches the glow.
@@ -740,8 +887,8 @@ async function main() {
       }
     }
 
-    const prompt = bobcat.isDrinking ? 'DRINKING…'
-                 : bobcat.canDrink   ? 'DRINK [E]'
+    const prompt = bobcat.isDrinking ? 'DRINKING'
+                 : bobcat.canDrink   ? 'DRINK (E)'
                  : null;
     hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps, prompt });
     if (typeof window !== 'undefined') {

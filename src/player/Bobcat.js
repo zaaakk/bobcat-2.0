@@ -38,5 +38,27 @@ export async function loadBobcat({ url = '/assets/bobcat.glb', onProgress } = {}
     rig.tick(dt, state);
   };
 
+  state.setRunCrop = rig.setRunCrop;
+  state.getRunCrop = rig.getRunCrop;
+  state.setRunTimeScale = rig.setRunTimeScale;
+  state.getRunTimeScale = rig.getRunTimeScale;
+  state.setMirrorEnabled = rig.setMirrorEnabled;
+  state.getMirrorEnabled = rig.getMirrorEnabled;
+  state.setMirrorLeadLock = rig.setMirrorLeadLock;
+  state.getMirrorLeadLock = rig.getMirrorLeadLock;
+  state.setMirrorExcludePattern = rig.setMirrorExcludePattern;
+  state.getMirrorExcludePattern = rig.getMirrorExcludePattern;
+  state.setPaused = rig.setPaused;
+  state.getPaused = rig.getPaused;
+  state.setForceSprint = rig.setForceSprint;
+  state.getForceSprint = rig.getForceSprint;
+  state.setRunTimeFraction = rig.setRunTimeFraction;
+  state.getRunTimeFraction = rig.getRunTimeFraction;
+  state.getFrameCount = rig.getFrameCount;
+  state.isFrameSkipped = rig.isFrameSkipped;
+  state.getSkippedFrames = rig.getSkippedFrames;
+  state.setFrameSkipped = rig.setFrameSkipped;
+  state.clearSkippedFrames = rig.clearSkippedFrames;
+
   return state;
 }
