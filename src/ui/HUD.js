@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 /**
  * HUD built on the sprite atlas in /assets/ui_spritesheet.png.
  *
@@ -232,7 +233,7 @@ export function createHUD({ dem, water }) {
     overflow: hidden;
   `;
   const portraitImg = document.createElement('img');
-  portraitImg.src = '/assets/profile.png';
+  portraitImg.src = asset('profile.png');
   portraitImg.alt = 'bobcat';
   portraitImg.style.cssText = `
     width: 100%; height: 100%; object-fit: cover;
@@ -281,9 +282,11 @@ export function createHUD({ dem, water }) {
   const minimapPan = document.createElement('div');
   minimapPan.id = 'minimap-pan';
   minimapPan.style.cssText = 'position: absolute; left: 0; top: 0; will-change: transform;';
+  // 2048 bake: at the 1.5km zoom the visible window is a small slice of the
+  // whole-map canvas, so 640 was rendering ~46 source pixels across the dial.
   const minimapCanvas = document.createElement('canvas');
-  minimapCanvas.width = 640;
-  minimapCanvas.height = 640;
+  minimapCanvas.width = 2048;
+  minimapCanvas.height = 2048;
   minimapCanvas.style.cssText = 'display: block; image-rendering: pixelated;';
   minimapPan.appendChild(minimapCanvas);
   clipDisk.appendChild(minimapPan);
@@ -313,7 +316,10 @@ export function createHUD({ dem, water }) {
   const minimapCtx = minimapCanvas.getContext('2d');
   renderMinimap(minimapCtx, minimapCanvas, dem);
 
-  const VIEW_DIAMETER_M = 5000;
+  // 1.5km across the dial: prey herds spawn 200-360m out, so their dots sit
+  // a clear third of the way to the rim instead of hugging the player marker
+  // (at the old 5km view a 300m herd was ~8px from centre — unfindable).
+  const VIEW_DIAMETER_M = 1500;
   const canvasDisplaySize = (dem.worldWidth / VIEW_DIAMETER_M) * innerD;
   minimapCanvas.style.width = canvasDisplaySize + 'px';
   minimapCanvas.style.height = canvasDisplaySize + 'px';
@@ -337,6 +343,44 @@ export function createHUD({ dem, water }) {
     }
   }
 
+  // ── minimap prey dots ──────────────────────────────────────────────────
+  // Live mobs move every frame, so unlike the static water-pool dots these
+  // come from a reusable pool that's repositioned in update(). Dots live in
+  // minimapPan so the existing pan transform handles world→screen for free;
+  // corpses drop off the map (a dead blip reads as "something to chase").
+  const PREY_DOT_COLORS = { deer: '#c84e4e' };   // red (goat was cut)
+  const preyDotPool = [];
+  function updatePreyDots(mobsList) {
+    let used = 0;
+    if (mobsList) {
+      for (const m of mobsList) {
+        const color = PREY_DOT_COLORS[m.typeId];
+        if (!color || m.state?.mode === 'dead') continue;
+        let dot = preyDotPool[used];
+        if (!dot) {
+          dot = document.createElement('div');
+          dot.style.cssText = `
+            position: absolute; width: 5px; height: 5px;
+            border-radius: 50%; border: 1px solid #14110d;
+            transform: translate(-50%, -50%); z-index: 1;
+          `;
+          minimapPan.appendChild(dot);
+          preyDotPool.push(dot);
+        }
+        dot.style.background = color;
+        const u = (m.position.x / dem.worldWidth) + 0.5;
+        const v = 1 - ((m.position.z / dem.worldHeight) + 0.5);
+        dot.style.left = (u * canvasDisplaySize) + 'px';
+        dot.style.top = (v * canvasDisplaySize) + 'px';
+        dot.style.display = 'block';
+        used++;
+      }
+    }
+    for (let i = used; i < preyDotPool.length; i++) {
+      preyDotPool[i].style.display = 'none';
+    }
+  }
+
   // ── bottom-center: action prompt (plain text) ─────────────────────────
   const promptEl = document.createElement('div');
   promptEl.id = 'action-prompt';
@@ -351,9 +395,10 @@ export function createHUD({ dem, water }) {
   let lastPrompt = null;
 
   /* ------------------------------ frame update ------------------------- */
-  function update({ playerYaw, playerPos, fps, prompt }) {
+  function update({ playerYaw, playerPos, fps, prompt, prey }) {
     // 3D arrow spins around vertical axis to match player yaw.
     compassArrow.setYaw(playerYaw);
+    updatePreyDots(prey);
 
     const u = (playerPos.x / dem.worldWidth) + 0.5;
     const v = 1 - ((playerPos.z / dem.worldHeight) + 0.5);

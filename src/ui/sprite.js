@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 /**
  * Sprite helpers backed by /assets/ui_spritesheet.png + .json manifest.
  *
@@ -15,7 +16,7 @@
 let MANIFEST = null;
 let SHEET_W = 0, SHEET_H = 0, SHEET_URL = '';
 
-export async function loadSpriteManifest(url = '/assets/ui_spritesheet.json') {
+export async function loadSpriteManifest(url = asset('ui_spritesheet.json')) {
   const res = await fetch(url);
   MANIFEST = await res.json();
   SHEET_W = MANIFEST.imageWidth;

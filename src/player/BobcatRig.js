@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
@@ -17,7 +18,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
  *     tick(dt)  // advances the mixer (or runs a procedural bob if unanimated)
  *   }
  */
-export async function loadBobcatRig({ url = '/assets/bobcat.glb', onProgress } = {}) {
+export async function loadBobcatRig({ url = asset('bobcat.glb'), onProgress } = {}) {
   const loader = new GLTFLoader();
 
   // Pre-load PZ fur textures in parallel with the GLB. Extracted via cobra-
@@ -32,11 +33,11 @@ export async function loadBobcatRig({ url = '/assets/bobcat.glb', onProgress } =
       res(t);
     }, undefined, () => res(null)));
   const [furBase, furNormal, furRough, eyeBase, whiskersBase] = await Promise.all([
-    loadOpt(`/assets/bobcat_textures/bobcat-newfurdiffuse.jpg?t=${Date.now()}`),
-    loadOpt('/assets/bobcat_textures/nabobcat_ani_male_fur.pnormaltexture.png', false),
-    loadOpt('/assets/bobcat_textures/nabobcat_ani_male_fur.proughnesspackedtexture.png', false),
-    loadOpt('/assets/bobcat_textures/nabobcat_ani_male_eye.pbasecolourandmasktexture.png'),
-    loadOpt('/assets/bobcat_textures/nabobcat_ani_male_whiskers.pdiffuse.png')
+    loadOpt(asset(`bobcat_textures/bobcat-newfurdiffuse.jpg?t=${Date.now()}`)),
+    loadOpt(asset('bobcat_textures/nabobcat_ani_male_fur.pnormaltexture.png'), false),
+    loadOpt(asset('bobcat_textures/nabobcat_ani_male_fur.proughnesspackedtexture.png'), false),
+    loadOpt(asset('bobcat_textures/nabobcat_ani_male_eye.pbasecolourandmasktexture.png')),
+    loadOpt(asset('bobcat_textures/nabobcat_ani_male_whiskers.pdiffuse.png'))
   ]);
   const pzTextures = { furBase, furNormal, furRough, eyeBase, whiskersBase };
 
@@ -311,17 +312,17 @@ function buildRig(gltf, pzTextures) {
     root.traverse(o => { if (o.isBone) boneByName.set(o.name, o); });
 
     // PZ convention: bones are `def_<name>_joint` (centerline) or
-    // `def_<name>_joint<L|R>` (paired). The L/R suffix sits directly on
-    // `_joint` with no separator.
-    const SIDE_RE = /^(.+_joint)([LR])(\.[^.]+)$/;
+    // `def_<name>_joint<L|R>` (paired). The L/R suffix is either directly
+    // on `_joint` (PZ source) or separated by a dot (Blender round-trip).
+    const SIDE_RE = /^(.+_joint)(\.?)([LR])(\.[^.]+)$/;
 
     // Detect the rig's mirror plane axis empirically by comparing world
     // positions of a known L/R pair. The axis with the largest absolute
     // L−R offset is the one the rig mirrors across.
     let mirrorAxisIdx = 0;
     for (const candidateBase of ['def_legUpr_joint', 'def_ear_joint', 'def_eye_joint', 'def_pelvis_joint']) {
-      const bL = boneByName.get(`${candidateBase}L`);
-      const bR = boneByName.get(`${candidateBase}R`);
+      const bL = boneByName.get(`${candidateBase}L`) || boneByName.get(`${candidateBase}.L`);
+      const bR = boneByName.get(`${candidateBase}R`) || boneByName.get(`${candidateBase}.R`);
       if (!bL || !bR) continue;
       const pL = new THREE.Vector3().setFromMatrixPosition(bL.matrixWorld);
       const pR = new THREE.Vector3().setFromMatrixPosition(bR.matrixWorld);
@@ -353,9 +354,9 @@ function buildRig(gltf, pzTextures) {
     for (const t of mirroredClip.tracks) {
       const m = t.name.match(SIDE_RE);
       if (!m) continue;
-      const myName = `${m[1]}${m[2]}`;
+      const myName = `${m[1]}${m[2]}${m[3]}`;
       if (pairData.has(myName)) continue;
-      const otherName = `${m[1]}${m[2] === 'L' ? 'R' : 'L'}`;
+      const otherName = `${m[1]}${m[2]}${m[3] === 'L' ? 'R' : 'L'}`;
       const myBone = boneByName.get(myName);
       const otherBone = boneByName.get(otherName);
       if (!myBone || !otherBone) continue;
@@ -380,7 +381,7 @@ function buildRig(gltf, pzTextures) {
     // Dump all L/R bone families to console so the user can see what's
     // available to include/exclude via the mirror pattern.
     const families = new Set();
-    for (const myName of pairData.keys()) families.add(myName.replace(/[LR]$/, ''));
+    for (const myName of pairData.keys()) families.add(myName.replace(/\.?[LR]$/, ''));
     console.log(`[BobcatRig] L/R bone families (${families.size}):\n  ${[...families].sort().join('\n  ')}`);
 
     const _q = new THREE.Quaternion();
@@ -395,8 +396,8 @@ function buildRig(gltf, pzTextures) {
       for (const t of mirroredClip.tracks) {
         const m = t.name.match(SIDE_RE);
         if (!m) continue;
-        const [, base, side, prop] = m;
-        const myName = `${base}${side}`;
+        const [, base, sep, side, prop] = m;
+        const myName = `${base}${sep}${side}`;
 
         // Excluded bones: restore the original source values verbatim.
         if (mirrorExcludePattern && mirrorExcludePattern.test(myName)) {
@@ -409,7 +410,7 @@ function buildRig(gltf, pzTextures) {
           continue;
         }
 
-        const otherName = `${base}${side === 'L' ? 'R' : 'L'}`;
+        const otherName = `${base}${sep}${side === 'L' ? 'R' : 'L'}`;
         const pair = pairData.get(myName);
         if (!pair) continue;
         const otherTrack = origByName.get(`${otherName}${prop}`);
@@ -671,8 +672,14 @@ function buildRig(gltf, pzTextures) {
       ? 1
       : (debugMirrorLeadLock !== 0 ? debugMirrorLeadLock : mirrorLead);
     if (run && runMirror) {
-      run.setEffectiveWeight(effectiveLead > 0 ? rr2 : 0);
-      runMirror.setEffectiveWeight(effectiveLead < 0 ? rr2 : 0);
+      // Cross-fade the lead swap instead of hard-cutting. An instant weight
+      // flip at every cycle wrap lands any original↔mirror asymmetry as a
+      // once-per-stride hitch — which reads as a limp. smoothedLead chases
+      // effectiveLead in tick() (~70ms), so the swap blends through the
+      // stride apex where the two clips are most alike.
+      const leadT = (smoothedLead + 1) * 0.5;   // 1 = original, 0 = mirror
+      run.setEffectiveWeight(rr2 * leadT);
+      runMirror.setEffectiveWeight(rr2 * (1 - leadT));
     } else if (run) {
       run.setEffectiveWeight(rr2);
     }
@@ -691,7 +698,43 @@ function buildRig(gltf, pzTextures) {
   // magnitude so it complements the mirrored leg phase, doesn't dominate it.
   const ROLL_LEAD_RAD = 0.045;
   let mirrorLead = 1;
+  let smoothedLead = 1;   // chases the active lead for the cross-fade
   let lastRunTime = 0;
+
+  // ---- Feeding pose (kill latch) ----------------------------------------
+  // While the sim is latched onto a kill, layer the run clip — restricted to
+  // the FRONT half of the skeleton — at high speed over the idle base. The
+  // pumping shoulders/neck/jaw of the run cycle read as tearing at the
+  // carcass, while the hindquarters keep the calm idle so the cat looks
+  // planted. Weight is set well above idle's so the front bones are
+  // feed-dominated (mixer normalizes by accumulated weight).
+  const FEED_FRONT_RE = /head|neck|jaw|front|clavicle|scapula|chest|spine3|lip|tongue|muzzle|ear|eye|brow|whisker/i;
+  const FEED_TIMESCALE = 2.4;
+  const FEED_DOMINANCE = 3.0;
+  let feedAction = null;
+  let feedWeight = 0;
+  function ensureFeedAction() {
+    if (feedAction || !mixer || !run) return;
+    const src = run.getClip();
+    const tracks = src.tracks
+      .filter(t => FEED_FRONT_RE.test(t.name.split('.')[0]))
+      .map(t => t.clone());
+    if (!tracks.length) return;
+    const clip = new THREE.AnimationClip('feed_front', src.duration, tracks);
+    feedAction = mixer.clipAction(clip);
+    feedAction.setLoop(THREE.LoopRepeat, Infinity);
+    feedAction.setEffectiveWeight(0);
+    feedAction.setEffectiveTimeScale(FEED_TIMESCALE);
+    feedAction.play();
+  }
+  function setFeeding(active, dt) {
+    if (active) ensureFeedAction();
+    if (!feedAction) return;
+    const target = active ? 1 : 0;
+    feedWeight += (target - feedWeight) * Math.min(1, dt * 10);
+    if (feedWeight < 0.01) feedWeight = active ? feedWeight : 0;
+    feedAction.setEffectiveWeight(feedWeight * FEED_DOMINANCE);
+  }
 
   function playJump() {
     if (!jump) return;
@@ -733,6 +776,18 @@ function buildRig(gltf, pzTextures) {
           if (runMirror) runMirror.time = run.time;
         }
         lastRunTime = t;
+      }
+      // Chase the active lead for the weight cross-fade (see
+      // setLocomotionBlend). ~70ms: fast enough that both clips only
+      // co-mix for a few frames around the swap, slow enough to kill the
+      // pop. While paused (scrubbing), snap — the debug levers should be
+      // instant.
+      {
+        const targetLead = !debugMirrorEnabled
+          ? 1
+          : (debugMirrorLeadLock !== 0 ? debugMirrorLeadLock : mirrorLead);
+        if (debugPaused) smoothedLead = targetLead;
+        else smoothedLead += (targetLead - smoothedLead) * Math.min(1, dt / 0.07);
       }
       // Target roll: only applied when run is the dominant gait. Fades in
       // smoothly with run weight so walking/transition speeds aren't tilted.
@@ -789,6 +844,7 @@ function buildRig(gltf, pzTextures) {
     playJump,
     stopJump,
     setDrinkPose,
+    setFeeding,
     setRunCrop,
     getRunCrop,
     setRunTimeScale,

@@ -42,6 +42,10 @@ export const SPLAT_DEFAULTS = {
   // is clamped at 0 so weights never go negative — peaks just get more
   // dominant while troughs stay at zero, producing sharper on/off mosaic).
   patchiness: 4.0,
+  // Mesa-top grassland: extra grass weight on flat, high ground (plateau
+  // caps). Real Stockton-plateau mesa tops are grama grassland, not bare
+  // caprock — without this the gravel/rocky weights win every flat summit.
+  mesaGrassScale: 2.6,
 };
 
 export function generateSplatMap(dem, resolution = 512, params = {}) {
@@ -56,6 +60,8 @@ export function generateSplatMap(dem, resolution = 512, params = {}) {
 
   return {
     splatA, splatB,
+    dataA, dataB,
+    resolution,
     params: p,
     regenerate(patch) {
       Object.assign(p, patch);
@@ -136,6 +142,12 @@ function fillSplatBuffers(dem, resolution, p, dataA, dataB) {
                   * p.gravelScale * nonVert * patchify(gravelPatch);
       let wGrass  = smoothstep(0.10, 0.0, slopeT) * (0.3 + 0.7 * elevT) * (0.5 + 0.5 * grassPatch)
                   * p.grassScale * nonVert * patchify(grassPatch);
+      // Mesa-top grassland term. Deliberately NOT run through patchify():
+      // patchiness=4 zeroes the noise troughs, which is what left plateau
+      // caps bare — the soft (0.55 + 0.45·patch) keeps tops consistently
+      // grassy while still varying.
+      const mesaTop = smoothstep(0.14, 0.03, slopeT) * smoothstep(0.50, 0.72, elevT);
+      wGrass += mesaTop * (0.55 + 0.45 * grassPatch) * p.mesaGrassScale * nonVert;
 
       const ripBedKey = (drainage * 0.7 + 0.3) * smoothstep(0.65, 0.05, elevT) * smoothstep(0.45, 0.0, slopeT);
       let wRipBed = ripBedKey * p.ripBedScale * nonVert * patchify(ripBedPatch);

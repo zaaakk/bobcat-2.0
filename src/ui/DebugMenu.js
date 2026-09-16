@@ -107,6 +107,14 @@ export function createDebugMenu({ panels = [] } = {}) {
       border: 2px solid #f0e6d0;
       cursor: pointer;
     }
+    #debug-menu .dbg-color {
+      width: 100%; height: 24px;
+      padding: 0;
+      background: #08060a;
+      border: 2px solid #0a0805;
+      box-shadow: inset 0 0 0 1px #4f3a26;
+      cursor: pointer;
+    }
     #debug-menu .dbg-button {
       display: inline-block;
       padding: 6px 14px;
@@ -209,4 +217,26 @@ export function panelButton(parent, label, onClick) {
   btn.addEventListener('click', onClick);
   parent.appendChild(btn);
   return btn;
+}
+
+export function panelColor(parent, opts) {
+  const { label, value, onInput } = opts;
+  const row = document.createElement('div');
+  row.className = 'dbg-row';
+  const labelEl = document.createElement('div');
+  labelEl.className = 'dbg-label';
+  labelEl.innerHTML = `<span>${label}</span><span class="dbg-val">${value}</span>`;
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.className = 'dbg-color';
+  input.value = value;
+  const valEl = labelEl.querySelector('.dbg-val');
+  input.addEventListener('input', () => {
+    valEl.textContent = input.value;
+    onInput(input.value);
+  });
+  row.appendChild(labelEl);
+  row.appendChild(input);
+  parent.appendChild(row);
+  return { row, input, set value(v) { input.value = v; valEl.textContent = v; } };
 }

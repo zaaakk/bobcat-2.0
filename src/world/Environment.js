@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { updateWorldLightingUniforms } from './WorldLighting.js';
+import { applySeasonPaletteToUniforms, getSeasonPalette } from './SeasonPalette.js';
 
 /**
  * Environment / day-night cycle. Owns:
@@ -20,7 +22,7 @@ import * as THREE from 'three';
  *   coupled to per-shader uniform names; future weather state (wind, cloud
  *   coverage, precip) can extend env.state and consumers pull from there.
  */
-export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill }) {
+export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill, bobcat }) {
   // Non-uniform clock: daylight/twilight get more real time, while the below-
   // horizon half of the sun path remains at the old 120 seconds. This keeps
   // night from dragging out when we lengthen the day.
@@ -59,6 +61,7 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     ambientNight:   new THREE.Color('#a8b8d6')
   };
   const bobcatFillTint = new THREE.Color('#fff7ea');
+  let foliagePalette = getSeasonPalette('summer_dry');
 
   // Live state — read by other systems each frame. Future weather fields
   // (wind vector, cloud cover, precip rate) will land here.
@@ -83,8 +86,25 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     /** Bell curve peaking around horizon angles; drives dusk colour blends. */
     twilightT: 0,
     /** 0 below horizon, > 0 once the sun is up; plain max(0, sunDir.y). */
-    directT: 0
+    directT: 0,
+    season: foliagePalette.id,
+    foliagePalette
   };
+
+  function pushSeasonPalette() {
+    state.foliagePalette = foliagePalette;
+    state.season = foliagePalette.id;
+    applySeasonPaletteToUniforms(world.terrain?.uniforms, foliagePalette);
+    if (world.plants?.tiers) {
+      for (const tier of world.plants.tiers) applySeasonPaletteToUniforms(tier.uniforms, foliagePalette);
+    }
+    if (world.foliageMass?.setPalette) world.foliageMass.setPalette(foliagePalette);
+  }
+
+  function setSeason(id) {
+    foliagePalette = getSeasonPalette(id);
+    pushSeasonPalette();
+  }
 
   function update(timeSec) {
     // ---- celestial geometry ----
@@ -137,6 +157,7 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     terrain.uniforms.uFogColorFar.value.copy(state.fogFar);
     terrain.uniforms.uFogDensity.value = THREE.MathUtils.lerp(0.00008, 0.00018, dayT) + twilightBand * 0.00003;
     state.fogDensity = terrain.uniforms.uFogDensity.value;
+    applySeasonPaletteToUniforms(terrain.uniforms, foliagePalette);
 
     for (const tier of world.plants.tiers) {
       tier.uniforms.uSunDir.value.copy(state.sunDir);
@@ -146,7 +167,14 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
       tier.uniforms.uFogColorMid.value.copy(state.fogMid);
       tier.uniforms.uFogColorFar.value.copy(state.fogFar);
       tier.uniforms.uFogDensity.value = terrain.uniforms.uFogDensity.value;
+      applySeasonPaletteToUniforms(tier.uniforms, foliagePalette);
     }
+    if (world.foliageMass?.setPalette) world.foliageMass.setPalette(foliagePalette);
+
+    // Characters share the terrain's lighting model, so they get the same
+    // sun/ambient/fog state the ground does rather than the scene lights.
+    // Pushed after the terrain uniforms above, which it reads from.
+    updateWorldLightingUniforms(bobcat?.lightingUniforms, state, terrain.uniforms);
 
     // Sun is moon-flipped at night — light direction reverses but sun.position
     // points at where the *light source* is, so it can illuminate scene normals
@@ -174,13 +202,19 @@ export function createEnvironment({ renderer, sky, world, sun, hemi, ambient, la
     }
     if (bobcatFill) {
       bobcatFill.color.copy(state.sunColor).lerp(bobcatFillTint, 0.55);
-      bobcatFill.intensity = dayT * 2.0 + twilightBand * 0.55;
+      // Camera-side key fill. The terrain is shader-lit ~2-3× brighter than
+      // the cat's physically-correct PBR (which divides albedo by π), so in
+      // daylight the cat read as a near-black silhouette against bright sand.
+      // This is the lever that brings it back onto the scene's brightness.
+      bobcatFill.intensity = dayT * 6.0 + twilightBand * 0.7;
     }
     if (bobcatTopFill) {
       bobcatTopFill.color.copy(state.hemiSky).lerp(bobcatFillTint, 0.35);
-      bobcatTopFill.intensity = dayT * 2.8 + twilightBand * 0.75;
+      bobcatTopFill.intensity = dayT * 4.5 + twilightBand * 0.9;
     }
   }
 
-  return { update, state };
+  pushSeasonPalette();
+
+  return { update, state, setSeason };
 }

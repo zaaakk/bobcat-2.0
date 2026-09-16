@@ -40,6 +40,17 @@ export function createMobs(scene) {
     for (const m of mobs) m.update?.(dt, t, ctx);
   }
 
+  /** Remove a single mob (streaming despawn). Safe to call mid-update —
+   *  splice happens immediately but update() iterates a stale index at
+   *  worst one frame. */
+  function remove(mob) {
+    const i = mobs.indexOf(mob);
+    if (i === -1) return;
+    mobs.splice(i, 1);
+    if (mob.object) scene.remove(mob.object);
+    mob.dispose?.();
+  }
+
   function dispose() {
     for (const m of mobs) {
       if (m.object) scene.remove(m.object);
@@ -48,7 +59,7 @@ export function createMobs(scene) {
     mobs.length = 0;
   }
 
-  return { registerType, spawnAt, update, dispose, mobs };
+  return { registerType, spawnAt, update, remove, dispose, mobs };
 }
 
 /**
@@ -61,6 +72,77 @@ export function createMobs(scene) {
  * but rotated about its forward axis to match the bird's banking angle as it
  * turns — that single tilt sells the soaring read better than a flat decal.
  */
+/**
+ * Streaming vulture kettles: keeps `maxKettles` kettles of circling vultures
+ * in a middle-distance ring around the player, recycling any that fall too
+ * far behind. Real kettles are a column of birds sharing one thermal —
+ * each kettle stacks 5-9 vultures at staggered altitudes and radii, all
+ * turning the same direction at slightly different rates.
+ *
+ * Unlike prey herds these never need to be close — the ring is tuned so a
+ * kettle is always visible somewhere on the horizon without ever circling
+ * directly over the player.
+ */
+export function createVultureKettles({ mobs, player, groundY, opts = {} }) {
+  const {
+    maxKettles = 4,
+    spawnMin = 450, spawnMax = 1300,
+    despawnRadius = 2200,
+    birdsMin = 5, birdsMax = 9,
+    tickInterval = 3.0,
+  } = opts;
+
+  const kettles = [];
+  let tickTimer = 0;
+
+  function spawnKettle() {
+    const bearing = Math.random() * Math.PI * 2;
+    const dist = spawnMin + Math.random() * (spawnMax - spawnMin);
+    const ax = player.position.x + Math.sin(bearing) * dist;
+    const az = player.position.z + Math.cos(bearing) * dist;
+    const ay = groundY ? groundY(ax, az) : player.position.y;
+
+    const n = birdsMin + Math.floor(Math.random() * (birdsMax - birdsMin + 1));
+    const baseRadius = 45 + Math.random() * 35;
+    const baseAltitude = 55 + Math.random() * 35;
+    const baseSpeed = 0.10 + Math.random() * 0.05;
+    const members = [];
+    for (let i = 0; i < n; i++) {
+      // Column structure: birds stack upward with widening circles, like a
+      // thermal. Phases spread evenly so the column reads as a swirl, not a
+      // line.
+      const t = i / Math.max(1, n - 1);
+      const mob = mobs.spawnAt('vulture', ax, ay, az, {
+        phase: t * Math.PI * 2 * 1.7 + Math.random() * 0.4,
+        radius: baseRadius + t * 40 + Math.random() * 8,
+        altitude: baseAltitude + t * 55 + Math.random() * 6,
+        angularSpeed: baseSpeed * (1 - t * 0.35) * (0.92 + Math.random() * 0.16),
+        wingSpan: 8,
+      });
+      if (mob) members.push(mob);
+    }
+    kettles.push({ x: ax, z: az, members });
+  }
+
+  function update(dt) {
+    tickTimer -= dt;
+    if (tickTimer > 0) return;
+    tickTimer = tickInterval;
+
+    for (let i = kettles.length - 1; i >= 0; i--) {
+      const k = kettles[i];
+      const d = Math.hypot(k.x - player.position.x, k.z - player.position.z);
+      if (d > despawnRadius) {
+        for (const m of k.members) mobs.remove(m);
+        kettles.splice(i, 1);
+      }
+    }
+    if (kettles.length < maxKettles) spawnKettle();
+  }
+
+  return { update, kettles };
+}
+
 export function createVultureType(texture, defaults = {}) {
   // One material is shared across every vulture instance — saves on uploads
   // and lets the GPU batch all of them in a single draw if Three decides to.

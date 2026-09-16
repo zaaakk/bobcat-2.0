@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { SPECIES } from './species.js';
-import { generateVegetationChunk } from './PlacementEngine.js';
+import { SPECIES, MAX_SPECIES } from './species.js';
+import { generateVegetationChunk, createVegetationChunkJob } from './PlacementEngine.js';
 
 /**
  * Three LOD tiers, all world-oriented (no per-frame camera billboarding):
@@ -12,13 +12,14 @@ import { generateVegetationChunk } from './PlacementEngine.js';
  * atlas tile via the per-instance aSpecies attribute. Distance-based alpha at
  * tier boundaries hides LOD pops.
  */
-export function createInstancedPlants({ atlas, instances = null, dem, groundY = null, shadows = null }) {
+export function createInstancedPlants({ atlas, instances = null, dem, groundY = null, shadows = null, foliageField = null }) {
   const tiers = [];
   const chunkSize = 512;
   const streaming = !instances;
   const activeChunks = new Map();
   const queued = new Map();
   const generationQueue = [];
+  let activeJob = null;   // the chunk currently being generated, frame-sliced
   const streamStats = {
     dense: createEmptyStats('dense'),
     far: createEmptyStats('far'),
@@ -31,14 +32,26 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
     denseRadius: 3200,
     farRadius: 6500,
     unloadRadius: 7200,
-    maxGeneratePerFrame: 3,
-    dense: { cellSize: 4.0, globalDensity: 2.2, maxPerChunk: 14000 },
-    far: { cellSize: 14.0, globalDensity: 1.65, acceptancePower: 0.82, acceptanceFloor: 0.035, maxPerChunk: 4200 }
+    // Cells of one chunk to generate per frame (frame-sliced streaming, see
+    // updateStreaming). A dense chunk is ~16k cells; at 2000/frame it spreads
+    // across ~8 frames (~130ms wall) so no single frame eats the ~60-90ms
+    // full-chunk scan that caused the periodic hitch. Capacity is still
+    // ~5 dense chunks/sec — far above the ~0.4/sec a sprint demands.
+    cellsPerFrame: 2000,
+    // maxPerChunk has to fit a fully closed canopy, or the cap thins the
+    // carpet back into a scatter: a 512m chunk on a 4m grid is ~16.4k cells,
+    // and inside a juniper brake essentially every one of them accepts.
+    // globalDensity scales acceptance directly, so it is the contrast dial
+    // between stand and opening: inside a brake juniper's score clamps
+    // acceptance to 1 regardless, while out in the caliche the marginal
+    // cells start failing. Lowering it opens the gaps without thinning the
+    // carpets.
+    dense: { cellSize: 4.0, globalDensity: 1.55, maxPerChunk: 24000 },
+    far: { cellSize: 14.0, globalDensity: 1.65, acceptancePower: 0.82, acceptanceFloor: 0.035, maxPerChunk: 5000 }
   };
 
   // Build atlas-rect lookup as a Vec4 array uniform: [uOffset, vOffset, uScale, vScale].
   // Pad to MAX_SPECIES so the shader can use a fixed-size array uniform.
-  const MAX_SPECIES = 12;
   const rects = new Float32Array(MAX_SPECIES * 4);
   SPECIES.forEach((s, idx) => {
     const r = atlas.uvRects[s.atlasIndex];
@@ -52,10 +65,45 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
   const aspects = new Float32Array(MAX_SPECIES);
   SPECIES.forEach((s, idx) => { aspects[idx] = s.aspect; });
 
+  // Canopy-normal params per species, packed as
+  // [blend, centerY, radiusY, translucency]. See the CANOPY table in
+  // species.js for what each one does.
+  const canopies = new Float32Array(MAX_SPECIES * 4);
+  SPECIES.forEach((s, idx) => {
+    const c = s.canopy;
+    canopies[idx * 4 + 0] = c.blend;
+    canopies[idx * 4 + 1] = c.center;
+    canopies[idx * 4 + 2] = c.radiusY;
+    canopies[idx * 4 + 3] = c.translucency;
+  });
+
   const sharedUniforms = {
     uAtlas: { value: atlas.texture },
     uRects: { value: rects },
     uAspects: { value: aspects },
+    uCanopy: { value: canopies },
+    // Master dials for the canopy-normal shading, tunable from the debug menu:
+    // strength scales every species' blend, wrap softens the terminator,
+    // contrast sets how far the lit/shadow sides spread apart (0 reproduces
+    // the old flat lighting exactly), trans scales the backlight glow.
+    uCanopyStrength: { value: 1.0 },
+    uCanopyWrap:     { value: 0.35 },
+    uCanopyContrast: { value: 2.0 },
+    uCanopyTrans:    { value: 1.0 },
+    // Near-camera dissolve. The camera's near plane is at 0.5m, so a plant
+    // must be fully gone by a little beyond that or it gets sliced open and
+    // you see the inside of the card. End is the clearance at which it has
+    // vanished; start is where it begins to go.
+    uNearFadeStart: { value: 5.5 },
+    uNearFadeEnd:   { value: 0.55 },
+    // Shapes the ramp. Below 1 it holds opacity high across most of the
+    // range and then drops away steeply at the very end, so foliage only
+    // reaches fully transparent right as it reaches the lens rather than
+    // going half-ghostly several metres out the way a plain smoothstep does.
+    uNearFadeCurve: { value: 0.35 },
+    // Mip bias at full proximity — the softening that goes with the fade, so
+    // near foliage defocuses instead of just thinning out.
+    uNearBlur:      { value: 2.5 },
     uSpeciesCount: { value: SPECIES.length },
     uSunDir: { value: new THREE.Vector3(0.5, 0.85, 0.2).normalize() },
     uSunColor: { value: new THREE.Color(1.0, 0.96, 0.85) },
@@ -73,6 +121,10 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
     uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
     uLanternIntensity: { value: 0.0 },
+    uPlantHueColor: { value: new THREE.Color('#bfa866') },
+    uPlantHueStrength: { value: 0.22 },
+    uPlantSaturation: { value: 0.86 },
+    uPlantValueScale: { value: 1.0 },
     uTime: { value: 0 }
   };
 
@@ -114,7 +166,24 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
       fragmentShader: FRAG,
       transparent: false,
       alphaTest: 0.5,
-      side: THREE.DoubleSide
+      // Alpha-to-coverage turns the fade alpha into MSAA sample coverage, so
+      // a dissolving plant blends smoothly while the material stays in the
+      // opaque pass — no sorting, no blend state, no dither grain. The
+      // renderer is created with antialias:true and the normal path draws
+      // straight to the default framebuffer, so the samples are there.
+      alphaToCoverage: true,
+      side: THREE.DoubleSide,
+      // Ground-contact z-fighting fix. The high-res detail patch redraws the
+      // ground the plant is rooted in and is itself pushed toward the camera
+      // (polygonOffset -12) so it beats the base mesh. Without a matching bias
+      // the plant's base shares the patch's depth at the contact line and the
+      // patch's dense triangle grid shimmers through the sprite. Bias the
+      // plants a little further forward than the patch so the sprite base wins
+      // the depth test decisively. The offset is a near-constant depth nudge,
+      // so it doesn't visibly float the cards.
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -24,
     });
 
     const group = new THREE.Group();
@@ -178,18 +247,52 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
         if (existing.mode === d.mode) continue;
         if (existing.mode === 'dense' && d.mode === 'far' && d.dist < streamCfg.denseRadius + chunkSize) continue;
       }
+      // Don't re-queue the chunk currently being generated.
+      if (activeJob && activeJob.d.key === d.key && activeJob.d.mode === d.mode) continue;
       if (queued.has(d.key) && queued.get(d.key) === d.mode) continue;
       queued.set(d.key, d.mode);
       generationQueue.push(d);
     }
 
-    generationQueue.sort((a, b) => a.dist - b.dist);
-    let made = 0;
-    while (made < streamCfg.maxGeneratePerFrame && generationQueue.length) {
-      const d = generationQueue.shift();
-      if (queued.get(d.key) !== d.mode) continue;
-      queued.delete(d.key);
-      if (generateDesiredChunk(d)) made++;
+    // Frame-sliced generation: advance ONE in-progress chunk job by a bounded
+    // number of cells per frame, then commit it when complete. A dense chunk
+    // is ~16k cells / ~60-90ms of scan; processing it whole in one frame was
+    // the periodic hitch. cellsPerFrame caps the per-frame cost (~a few ms);
+    // the distance-sorted queue means the nearest chunk always generates
+    // first, so plants still fill in underfoot before distant ones.
+    if (!activeJob && generationQueue.length) {
+      generationQueue.sort((a, b) => a.dist - b.dist);
+      let d;
+      while ((d = generationQueue.shift())) {
+        if (queued.get(d.key) !== d.mode) { d = null; continue; }   // stale
+        queued.delete(d.key);
+        const existing = activeChunks.get(d.key);
+        if (existing && (existing.mode === 'dense' || existing.mode === d.mode)) { d = null; continue; }
+        break;
+      }
+      if (d) {
+        const cfg = streamCfg[d.mode];
+        activeJob = {
+          d,
+          job: createVegetationChunkJob({
+            dem, groundY, chunkX: d.cx, chunkZ: d.cz, chunkSize,
+            cellSize: cfg.cellSize,
+            globalDensity: cfg.globalDensity,
+            acceptancePower: cfg.acceptancePower ?? 1,
+            acceptanceFloor: cfg.acceptanceFloor ?? 0,
+            mode: d.mode,
+            maxPerChunk: cfg.maxPerChunk,
+            foliageField
+          })
+        };
+      }
+    }
+    if (activeJob) {
+      const done = activeJob.job.step(streamCfg.cellsPerFrame);
+      if (done) {
+        addChunkInstances(activeJob.d.key, activeJob.job.result(), activeJob.d.mode);
+        activeJob = null;
+      }
     }
   }
 
@@ -208,7 +311,8 @@ export function createInstancedPlants({ atlas, instances = null, dem, groundY = 
         acceptancePower: cfg.acceptancePower ?? 1,
         acceptanceFloor: cfg.acceptanceFloor ?? 0,
         mode: d.mode,
-        maxPerChunk: cfg.maxPerChunk
+        maxPerChunk: cfg.maxPerChunk,
+        foliageField
       });
     addChunkInstances(d.key, chunkInstances, d.mode);
     return true;
@@ -542,9 +646,14 @@ function makeQuadGeometry() {
     -0.5, 1, 0
   ]);
   const uvs = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
+  // The card's own facing, per vertex. Blended against the canopy blob normal
+  // in the shader (see VERT) — on its own it is what makes cards look like
+  // cards, so it is never used alone except for genuinely flat species.
+  const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
   const idx = [0, 1, 2, 0, 2, 3];
   g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  g.setAttribute('cardNormal', new THREE.BufferAttribute(normals, 3));
   g.setIndex(idx);
   return g;
 }
@@ -565,9 +674,16 @@ function makeCrossGeometry() {
      0, 1, -0.5
   ]);
   const uvs = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1]);
+  // Each quad faces its own way — first spans X (normal +Z), second spans Z
+  // (normal +X).
+  const normals = new Float32Array([
+    0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0
+  ]);
   const idx = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
   g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  g.setAttribute('cardNormal', new THREE.BufferAttribute(normals, 3));
   g.setIndex(idx);
   return g;
 }
@@ -575,6 +691,7 @@ function makeCrossGeometry() {
 function makeRosetteGeometry(quads) {
   const positions = [];
   const uvs = [];
+  const normals = [];
   const idx = [];
   for (let q = 0; q < quads; q++) {
     const a = (q / quads) * Math.PI; // span 180° → 60° between quads for 3 quads
@@ -585,11 +702,15 @@ function makeRosetteGeometry(quads) {
     positions.push( 0.5 * c, 1,   0.5 * s);
     positions.push(-0.5 * c, 1,  -0.5 * s);
     uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
+    // Quad width runs along (c, 0, s); its facing is that turned 90° in the
+    // ground plane.
+    for (let v = 0; v < 4; v++) normals.push(s, 0, -c);
     idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
   const g = new THREE.InstancedBufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
   g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+  g.setAttribute('cardNormal', new THREE.BufferAttribute(new Float32Array(normals), 3));
   g.setIndex(idx);
   return g;
 }
@@ -601,8 +722,11 @@ const VERT = /* glsl */`
   attribute float aRotation;
   attribute float aSpecies;
   attribute float aSourceMode;
-  uniform vec4 uRects[12];
-  uniform float uAspects[12];
+  attribute vec3 cardNormal;
+  uniform vec4 uRects[${MAX_SPECIES}];
+  uniform float uAspects[${MAX_SPECIES}];
+  uniform vec4 uCanopy[${MAX_SPECIES}];
+  uniform float uCanopyStrength;
   uniform float uTierMin;
   uniform float uTierMax;
   uniform float uFadeIn;
@@ -612,7 +736,9 @@ const VERT = /* glsl */`
   varying float vFade;
   varying float vFarSource;
   varying vec3 vWorldPos;
-  varying vec3 vNormal;
+  varying vec3 vCardNormal;
+  varying vec3 vCanopyNormal;
+  varying vec2 vCanopyParams;   // x: blob/card blend, y: translucency
 
   void main() {
     int sp = int(aSpecies + 0.5);
@@ -635,7 +761,29 @@ const VERT = /* glsl */`
 
     vec3 worldPos = rp + aOffset;
     vWorldPos = worldPos;
-    vNormal = normalize(vec3(s, 0.0, c));
+
+    // ---- canopy normals (the "transfer normals from a sphere" trick) ----
+    // Build the normal of an implicit blob sitting inside the plant, in the
+    // plant's unit local space: half-width 0.5 horizontally, canopy.z radius
+    // vertically about height canopy.y. Every card vertex then borrows the
+    // blob's normal, so a bush shades as one rounded volume with a lit side
+    // and a shadow side instead of each card catching the sun on its own.
+    // aspect and aScale are uniform scales along the card, so they cancel out
+    // of the direction and are left out.
+    vec4 canopy = uCanopy[sp];
+    vec3 blobDir = vec3(
+      position.x * 2.0,
+      (position.y - canopy.y) / max(canopy.z, 0.02),
+      position.z * 2.0
+    );
+    blobDir.y += 1e-4;   // keep the very centre from degenerating to zero
+    vec3 blobN = normalize(blobDir);
+
+    // Both normals live in the plant's local space — turn them with the
+    // instance so a rotated plant is lit as a rotated plant.
+    vCanopyNormal = vec3(c * blobN.x - s * blobN.z, blobN.y, s * blobN.x + c * blobN.z);
+    vCardNormal = vec3(c * cardNormal.x - s * cardNormal.z, cardNormal.y, s * cardNormal.x + c * cardNormal.z);
+    vCanopyParams = vec2(clamp(canopy.x * uCanopyStrength, 0.0, 1.0), canopy.w);
 
     // Distance to camera, used for tier visibility.
     float dist = length(cameraPosition - aOffset);
@@ -668,33 +816,110 @@ const FRAG = /* glsl */`
   uniform vec3 uLanternColor;
   uniform float uLanternRange;
   uniform float uLanternIntensity;
+  uniform vec3 uPlantHueColor;
+  uniform float uPlantHueStrength;
+  uniform float uPlantSaturation;
+  uniform float uPlantValueScale;
+  uniform float uCanopyWrap;
+  uniform float uCanopyContrast;
+  uniform float uCanopyTrans;
   varying vec2 vAtlasUv;
   varying float vFade;
   varying float vFarSource;
   varying vec3 vWorldPos;
-  varying vec3 vNormal;
+  varying vec3 vCardNormal;
+  varying vec3 vCanopyNormal;
+  varying vec2 vCanopyParams;
+  uniform float uNearFadeStart;
+  uniform float uNearFadeEnd;
+  uniform float uNearFadeCurve;
+  uniform float uNearBlur;
+
+  vec3 paletteTint(vec3 color) {
+    float lum = max(dot(color, vec3(0.299, 0.587, 0.114)), 0.001);
+    vec3 tinted = normalize(max(uPlantHueColor, vec3(0.001))) * lum * 1.72;
+    vec3 outCol = mix(color, tinted, clamp(uPlantHueStrength, 0.0, 1.0));
+    float outLum = max(dot(outCol, vec3(0.299, 0.587, 0.114)), 0.001);
+    outCol *= lum / outLum;
+    outCol = mix(vec3(lum), outCol, uPlantSaturation) * uPlantValueScale;
+    return outCol;
+  }
 
   void main() {
-    vec4 tex = texture2D(uAtlas, vAtlasUv);
+    // ---- near-camera dissolve ----
+    // Per fragment, not per plant. Fading whole instances was the obvious
+    // approach and it is wrong here: a plant's card can reach half its own
+    // height sideways, so a 5m juniper would have to vanish entirely while
+    // its trunk was still ~3m away, and in a closed brake that carves a
+    // clearing that follows the camera around. Per fragment, only the
+    // foliage actually at the lens melts and the bush itself stays put, so
+    // the canopy parts around you instead of opening a hole.
+    //
+    // nearT runs 0 at the lens to 1 at uNearFadeStart and drives both the
+    // opacity ramp and the defocus. uNearFadeEnd sits just past the 0.5m
+    // near plane, so a fragment is gone a hair before the plane could slice
+    // it open, and not before.
+    float camDist = length(cameraPosition - vWorldPos);
+    float nearT = smoothstep(uNearFadeEnd, uNearFadeStart, camDist);
+    float nearFade = pow(nearT, uNearFadeCurve);
+
+    // Sampled with a mip bias before any discard: biased sampling still
+    // relies on implicit derivatives, which want uniform control flow.
+    vec4 tex = texture2D(uAtlas, vAtlasUv, (1.0 - nearT) * uNearBlur);
     if (tex.a < 0.5) discard;
     if (vFade < 0.5) discard; // alpha-test fade approximation
+    if (nearFade <= 0.002) discard;
+    vec3 plantRgb = paletteTint(tex.rgb);
 
-    // Approximate top-lit foliage shading.
-    float ndl = clamp(dot(vNormal, uSunDir), 0.0, 1.0);
+    // ---- canopy shading ----
+    // Cards are double-sided, so the card's own normal has to be turned to
+    // face the viewer before it means anything. The blob normal comes from
+    // vertex position, not facing, so it needs no such fix — one of the
+    // reasons this trick holds up on two-sided foliage.
+    vec3 cardN = normalize(vCardNormal);
+    if (!gl_FrontFacing) cardN = -cardN;
+    vec3 N = normalize(mix(cardN, normalize(vCanopyNormal), vCanopyParams.x));
+
+    vec3 viewRay = normalize(vWorldPos - cameraPosition);
+    float sunAlign = max(dot(viewRay, uSunDir), 0.0);
     float topLight = clamp(uSunDir.y, 0.0, 1.0);
-    vec3 lit = tex.rgb * (uSunColor * (0.55 + 0.55 * topLight) + uAmbient * 0.95);
 
-    // Lantern pool — adds warm light to plants near the bobcat.
+    // Wrapped diffuse: leaves are thin and bounce light around, so the
+    // terminator sits past 90° rather than cutting hard at it.
+    float wrap = max(uCanopyWrap, 0.0);
+    float diff = clamp((dot(N, uSunDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    // uCanopyContrast 0 collapses this to the old flat 0.55 + 0.55 * topLight.
+    float shade = mix(0.5, diff, uCanopyContrast);
+
+    // Hemispheric ambient — upward-facing parts of the canopy see more sky
+    // than the undersides. Averages out to the old flat 0.95 term.
+    float skyFacing = N.y * 0.5 + 0.5;
+    vec3 ambient = uAmbient * (0.72 + 0.46 * skyFacing);
+
+    // Transmission: looking toward the sun through a leaf that faces away
+    // from it. This is what makes backlit grass and thin shrubs glow.
+    float transmit = pow(sunAlign, 3.0) * (1.0 - diff) * topLight *
+      vCanopyParams.y * uCanopyTrans;
+
+    float direct = max(0.0, 0.55 + 1.10 * shade * topLight) + transmit;
+    vec3 lit = plantRgb * (uSunColor * direct + ambient);
+
+    // Lantern pool — adds warm light to plants near the bobcat. Shaded by the
+    // same canopy normal, so the near side of a bush catches the pool and the
+    // far side falls away. mix(0.5, ...) * 2.0 is 1.0 at contrast 0, i.e. the
+    // old unshaded pool.
     vec3 toLantern = uLanternPos - vWorldPos;
     float lanternD = length(toLantern);
     float lanternAtt = clamp(1.0 - lanternD / uLanternRange, 0.0, 1.0);
     lanternAtt *= lanternAtt;
-    lit += tex.rgb * uLanternColor * 0.9 * lanternAtt * uLanternIntensity * (1.0 - vFarSource);
+    vec3 lanternDir = toLantern / max(lanternD, 0.001);
+    float lanternNdl = clamp((dot(N, lanternDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    lanternAtt *= mix(0.5, lanternNdl, uCanopyContrast) * 2.0;
+    lit += plantRgb * uLanternColor * 0.9 * lanternAtt * uLanternIntensity * (1.0 - vFarSource);
 
     lit *= uExposure;
 
     // Aerial perspective — same monotonic far-colour takeover as terrain.
-    vec3 viewRay = normalize(vWorldPos - cameraPosition);
     float dist = length(cameraPosition - vWorldPos);
     float horizon = pow(clamp(1.0 - abs(viewRay.y), 0.0, 1.0), 1.7);
     float lowAir = 1.0 - smoothstep(520.0, 1500.0, vWorldPos.y);
@@ -703,7 +928,7 @@ const FRAG = /* glsl */`
     fog = smoothstep(0.0, 1.0, clamp(fog, 0.0, 1.0));
     vec3 nearFog = mix(uFogColorLow, uFogColorMid, smoothstep(0.0, 0.45, fog));
     vec3 fogCol = mix(nearFog, uFogColorFar, smoothstep(0.35, 0.85, fog));
-    float sunScatter = pow(max(dot(viewRay, uSunDir), 0.0), 10.0);
+    float sunScatter = pow(sunAlign, 10.0);
     fogCol += uSunColor * sunScatter * horizon * fog * (1.0 - smoothstep(0.60, 0.95, fog)) * 0.12;
     float horizonTakeover = smoothstep(0.85, 1.0, fog);
     fogCol = mix(fogCol, uFogColorFar, horizonTakeover);
@@ -712,7 +937,8 @@ const FRAG = /* glsl */`
     lit = mix(lit, vec3(dot(lit, vec3(0.299, 0.587, 0.114))), vFarSource * 0.18);
     lit = mix(lit, fogCol, fog);
 
-    gl_FragColor = vec4(lit, 1.0);
+    // Alpha feeds sample coverage, not blending — see alphaToCoverage above.
+    gl_FragColor = vec4(lit, nearFade);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }

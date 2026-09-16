@@ -50,6 +50,20 @@ export function createBobcatSim({ pivot, support }) {
     hydration: 1.0,
     onDrinkStart: null,
     onDrinkEnd: null,
+    // Kill latch: while latched the cat is pulled to a bite point and held
+    // facing latchYaw (input ignored, like drinking) — main.js triggers this
+    // when prey dies so the cat visibly "holds" the kill instead of running
+    // through the corpse.
+    isLatched: false,
+    latchTimer: 0,
+    latchPoint: new THREE.Vector3(),
+    latchYaw: 0,
+    startLatch(x, z, yaw, duration = 1.4) {
+      state.isLatched = true;
+      state.latchTimer = duration;
+      state.latchPoint.set(x, 0, z);
+      state.latchYaw = yaw;
+    },
   };
 
   let groundFn = (x, z) => 0;
@@ -90,9 +104,16 @@ export function createBobcatSim({ pivot, support }) {
     // Slow ambient hydration loss — won't matter until something reads it.
     state.hydration = Math.max(0, state.hydration - dt * 0.005);
 
+    // ---- kill latch timer ----------------------------------------------
+    if (state.isLatched) {
+      state.latchTimer -= dt;
+      if (state.latchTimer <= 0) state.isLatched = false;
+    }
+    const inputLocked = state.isDrinking || state.isLatched;
+
     // ---- yaw + horizontal speed ----------------------------------------
-    const fwd    = state.isDrinking ? 0 : inputs.move.y;
-    const strafe = state.isDrinking ? 0 : inputs.move.x;
+    const fwd    = inputLocked ? 0 : inputs.move.y;
+    const strafe = inputLocked ? 0 : inputs.move.x;
     const wantMove = (fwd !== 0 || strafe !== 0);
 
     if (wantMove) {
@@ -111,7 +132,7 @@ export function createBobcatSim({ pivot, support }) {
     // ground; subsequent presses while airborne are double-jumps. The
     // second is slightly weaker so the bobcat doesn't rocket into the sky.
     const canJump = state.infiniteJumps || state.jumpsRemaining > 0;
-    if (inputs.jumpPressed && canJump && !state.isDrinking) {
+    if (inputs.jumpPressed && canJump && !inputLocked) {
       const isFirst = !state.airborne || state.jumpsRemaining === state.maxJumps;
       state.airborne = true;
       state.vy = state.jumpInitialVy * (isFirst ? 1.0 : 0.85);
@@ -123,6 +144,17 @@ export function createBobcatSim({ pivot, support }) {
     // ---- horizontal motion + DEM clamp ---------------------------------
     state.position.x += Math.sin(state.yaw) * state.speed * dt;
     state.position.z += Math.cos(state.yaw) * state.speed * dt;
+
+    // While latched, pull hard to the bite point and face it — overrides the
+    // residual momentum integrated above so the cat plants at the kill
+    // instead of sliding past it.
+    if (state.isLatched) {
+      const k = 1 - Math.exp(-12 * dt);
+      state.position.x += (state.latchPoint.x - state.position.x) * k;
+      state.position.z += (state.latchPoint.z - state.position.z) * k;
+      state.yaw = lerpAngle(state.yaw, state.latchYaw, Math.min(1, dt * 12));
+      state.speed = THREE.MathUtils.damp(state.speed, 0, 14, dt);
+    }
 
     const m = 50;
     const halfW = dem.worldWidth * 0.5 - m;

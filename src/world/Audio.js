@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 /**
  * Ambient + interactive audio layer.
  *
@@ -193,6 +194,7 @@ export function createAudio() {
   // ---------- public API ----------
   let footstepNames = [];
   let distantCallNames = [];
+  let eatBuffer = null;
   let started = false;
   let lastFootstepAt = 0;
   let nextDistantCallAt = 0;
@@ -215,18 +217,20 @@ export function createAudio() {
       return null;
     }
     const loads = await Promise.all([
-      loadFirst('wind', ['/assets/audio/wind_open.mp3', '/assets/audio/wind_open.ogg']),
-      loadFirst('cicadas', ['/assets/audio/cicadas_day.mp3', '/assets/audio/cicadas_day.ogg']),
-      loadFirst('crickets', ['/assets/audio/crickets_night.mp3', '/assets/audio/crickets_night.ogg']),
-      loadFirst('grass', ['/assets/audio/grass_rustle.mp3', '/assets/audio/grass_rustle.ogg']),
-      loadFirst('fs1', ['/assets/audio/footstep_dirt_1.mp3', '/assets/audio/footstep_dirt_1.ogg']),
-      loadFirst('fs2', ['/assets/audio/footstep_dirt_2.mp3', '/assets/audio/footstep_dirt_2.ogg']),
-      loadFirst('fs3', ['/assets/audio/footstep_dirt_3.mp3', '/assets/audio/footstep_dirt_3.ogg']),
-      loadFirst('coyote', ['/assets/audio/coyote_howl_distant.mp3', '/assets/audio/coyote_howl_distant.ogg']),
-      loadFirst('hawk', ['/assets/audio/hawk_call_distant.mp3', '/assets/audio/hawk_call_distant.ogg']),
-      loadFirst('owl', ['/assets/audio/owl_hoot_distant.mp3', '/assets/audio/owl_hoot_distant.ogg'])
+      loadFirst('wind', [asset('audio/wind_open.mp3'), asset('audio/wind_open.ogg')]),
+      loadFirst('cicadas', [asset('audio/cicadas_day.mp3'), asset('audio/cicadas_day.ogg')]),
+      loadFirst('crickets', [asset('audio/crickets_night.mp3'), asset('audio/crickets_night.ogg')]),
+      loadFirst('grass', [asset('audio/grass_rustle.mp3'), asset('audio/grass_rustle.ogg')]),
+      loadFirst('fs1', [asset('audio/footstep_dirt_1.mp3'), asset('audio/footstep_dirt_1.ogg')]),
+      loadFirst('fs2', [asset('audio/footstep_dirt_2.mp3'), asset('audio/footstep_dirt_2.ogg')]),
+      loadFirst('fs3', [asset('audio/footstep_dirt_3.mp3'), asset('audio/footstep_dirt_3.ogg')]),
+      loadFirst('coyote', [asset('audio/coyote_howl_distant.mp3'), asset('audio/coyote_howl_distant.ogg')]),
+      loadFirst('hawk', [asset('audio/hawk_call_distant.mp3'), asset('audio/hawk_call_distant.ogg')]),
+      loadFirst('owl', [asset('audio/owl_hoot_distant.mp3'), asset('audio/owl_hoot_distant.ogg')]),
+      loadFirst('eat', [asset('audio/bobcat_eat.ogg')])
     ]);
-    const [wind, cicadas, crickets, grass, fs1, fs2, fs3, coyote, hawk, owl] = loads;
+    const [wind, cicadas, crickets, grass, fs1, fs2, fs3, coyote, hawk, owl, eat] = loads;
+    eatBuffer = eat;
 
     // Wind bed: real file if present, else synth bed.
     if (wind) {
@@ -331,6 +335,80 @@ export function createAudio() {
     }
   }
 
+  // One-shot for a prey kill: low body-thump + a sharp bite snap + a short
+  // wet squelch. All procedural (same as the fallback footstep) so it works
+  // without any sound file. Layer timings staggered a few ms so it reads as
+  // one impact, not three sounds.
+  function kill() {
+    if (!ctx) return;
+    const now = ctx.currentTime;
+
+    // 1. Thump — sine pitch-drop, the body hitting the ground.
+    {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(110, now);
+      osc.frequency.exponentialRampToValueAtTime(42, now + 0.16);
+      const env = ctx.createGain();
+      env.gain.setValueAtTime(0.0, now);
+      env.gain.linearRampToValueAtTime(0.5, now + 0.012);
+      env.gain.exponentialRampToValueAtTime(0.001, now + 0.30);
+      osc.connect(env).connect(master);
+      osc.start(now);
+      osc.stop(now + 0.32);
+    }
+
+    // 2. Snap — tight band-passed noise click, the bite itself.
+    {
+      const buf = noiseBuffer(0.06, 'pink');
+      if (buf) {
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 1.2;
+        const env = ctx.createGain();
+        env.gain.setValueAtTime(0.0, now + 0.015);
+        env.gain.linearRampToValueAtTime(0.45, now + 0.022);
+        env.gain.exponentialRampToValueAtTime(0.001, now + 0.075);
+        src.connect(bp).connect(env).connect(master);
+        src.start(now + 0.015);
+        src.stop(now + 0.09);
+      }
+    }
+
+    // 3. Squelch — low-passed brown noise tail.
+    {
+      const buf = noiseBuffer(0.28, 'brown');
+      if (buf) {
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass'; lp.frequency.value = 650;
+        const env = ctx.createGain();
+        env.gain.setValueAtTime(0.0, now + 0.03);
+        env.gain.linearRampToValueAtTime(0.28, now + 0.06);
+        env.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+        src.connect(lp).connect(env).connect(master);
+        src.start(now + 0.03);
+        src.stop(now + 0.36);
+      }
+    }
+  }
+
+  // Bobcat snarl/feeding vocal — pre-trimmed to 3s with a baked fade-out
+  // (public/assets/audio/bobcat_eat.ogg). Played at the kill, slightly after
+  // the bite impact so the thump lands first.
+  function eat() {
+    if (!ctx || !eatBuffer) return;
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = eatBuffer;
+    const g = ctx.createGain();
+    g.gain.value = 0.5;
+    src.connect(g).connect(master);
+    src.start(now + 0.22);
+  }
+
   function tick(timeSec) {
     if (!ctx || !started) return;
     if (timeSec >= nextDistantCallAt && distantCallNames.length && Math.random() < 0.85) {
@@ -351,5 +429,5 @@ export function createAudio() {
     }
   }
 
-  return { start, footstep, setDayMix, tick };
+  return { start, footstep, kill, eat, setDayMix, tick };
 }

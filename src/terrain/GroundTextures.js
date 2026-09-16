@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 import * as THREE from 'three';
 
 /**
@@ -127,17 +128,17 @@ export async function loadGroundTextures(renderer) {
 
   const [tRock, tGrass, tGravel, tSand, tRipBed, tRockyZ, tSandyW, tDefaultNormal,
          normalAtlas, groundDetail] = await Promise.all([
-    loadDiffuse('/assets/ground/rock.png'),
-    loadDiffuse('/assets/ground/grassdry.png'),
-    loadDiffuse('/assets/ground/gravel.png'),
-    loadDiffuse('/assets/ground/sand.png'),
-    loadDiffuse('/assets/ground/riparianbed.png'),
-    loadDiffuse('/assets/ground/rocky-zone.png'),
-    loadDiffuse('/assets/ground/sandywash.png'),
-    loadDiffuse('/assets/ground/normal.png'),
+    loadDiffuse(asset('ground/rock.png')),
+    loadDiffuse(asset('ground/grassdry.png')),
+    loadDiffuse(asset('ground/gravel.png')),
+    loadDiffuse(asset('ground/sand.png')),
+    loadDiffuse(asset('ground/riparianbed.png')),
+    loadDiffuse(asset('ground/rocky-zone.png')),
+    loadDiffuse(asset('ground/sandywash.png')),
+    loadDiffuse(asset('ground/normal.png')),
     // 4×2 atlas of the 7 per-material normal maps. One sampler.
-    loadAtlas('/assets/ground/normal-atlas.png', { gridX: 4, gridY: 2, gutter: 2 }),
-    loadDetail('/assets/ground/ground-detail.png'),
+    loadAtlas(asset('ground/normal-atlas.png'), { gridX: 4, gridY: 2, gutter: 2 }),
+    loadDetail(asset('ground/ground-detail.png')),
   ]);
 
   return {

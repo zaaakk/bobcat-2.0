@@ -10,3 +10,23 @@ dist
 
 # Planet Zoo source assets — only converted PNGs/glb belong in the repo
 NABobcat/
+
+# Downloaded mod archives (Nexus etc.) — source material, never shipped
+*.zip
+
+# Intermediate/backup model states. asset-archive/ holds everything that was
+# once under public/assets but isn't loaded at runtime: superseded bobcat GLBs,
+# the pre-repair rig the gait script rebuilds from, the full-res source normal
+# maps that were baked into ground/normal-atlas.png, and the cut goat.
+asset-archive/
+*.glb.bak
+*.glb.pre_repair
+
+# Source DEM / reference imagery (the game ships the derived terrarium.png)
+TX_Pandale_*/
+
+# Third-party model packs kept locally for reference
+Farm Animals Animated*/
+
+__pycache__/
+*.pyc

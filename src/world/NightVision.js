@@ -20,7 +20,14 @@ export function createNightVision(renderer) {
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
     type: THREE.UnsignedByteType,
-    format: THREE.RGBAFormat
+    format: THREE.RGBAFormat,
+    // The renderer asks for antialias:true, but that only covers the default
+    // framebuffer — everything drawn through this target was losing MSAA.
+    // The foliage near-camera dissolve rides on sample coverage, so without
+    // this it would snap on and off whenever night vision or post-grade is
+    // enabled. Multisampling the target keeps the fade (and the edges of
+    // everything else) consistent across both render paths.
+    samples: 4
   });
 
   const scene = new THREE.Scene();

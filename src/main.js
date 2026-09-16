@@ -1,3 +1,4 @@
+import { asset } from './assetPath.js';
 import * as THREE from 'three';
 
 import { World } from './world/World.js';
@@ -6,13 +7,15 @@ import { createEnvironment } from './world/Environment.js';
 import { createAudio } from './world/Audio.js';
 import { createNightVision } from './world/NightVision.js';
 import { createDust } from './world/Dust.js';
-import { createMobs, createVultureType } from './world/Mobs.js';
+import { createBloodDecals } from './world/BloodDecals.js';
+import { createMobs, createVultureType, createVultureKettles } from './world/Mobs.js';
+import { loadPreyAsset, createPreyType, createPreyHerds } from './world/Prey.js';
 import { loadBobcat } from './player/Bobcat.js';
 import { chooseSpawnPoint } from './player/Spawn.js';
 import { createThirdPersonCamera } from './player/Camera.js';
 import { createInput } from './player/Input.js';
 import { createHUD, setLoadingProgress, hideLoading, ensureSpritesLoaded, initLoadingScreen } from './ui/HUD.js';
-import { createDebugMenu, panelRow, panelButton } from './ui/DebugMenu.js';
+import { createDebugMenu, panelRow, panelButton, panelColor } from './ui/DebugMenu.js';
 
 main().catch(err => {
   console.error(err);
@@ -74,6 +77,7 @@ async function main() {
   if (sp.has('noplants')) {
     for (const t of world.plants.tiers) t.mesh.visible = false;
     if (world.shadows) world.shadows.setPlantEnabled(false);
+    if (world.foliageMass) world.foliageMass.setEnabled(false);
   }
   if (sp.has('noterrain')) world.terrain.mesh.visible = false;
   if (sp.has('noshadows') && world.shadows) world.shadows.setEnabled(false);
@@ -95,6 +99,7 @@ async function main() {
     await world.plants.prewarm(bobcat.position, t => {
       setLoadingProgress(0.985 + t * 0.012, 'Growing brush…');
     });
+    if (world.foliageMass?.prewarm) await world.foliageMass.prewarm(bobcat.position);
   }
 
   bobcat.setGroundFn((x, z) => world.groundY(x, z));
@@ -131,7 +136,7 @@ async function main() {
   const texLoader = new THREE.TextureLoader();
   const maxAniso = renderer.capabilities.getMaxAnisotropy?.() || 8;
   const vultureTex = await new Promise((res, rej) =>
-    texLoader.load('/assets/mobs/turkeyvulture.png', t => {
+    texLoader.load(asset('mobs/turkeyvulture.png'), t => {
       t.colorSpace = THREE.SRGBColorSpace;
       t.anisotropy = maxAniso;
       res(t);
@@ -146,49 +151,121 @@ async function main() {
     // the silhouette.
     wingSpan: 5
   }));
-  // The "personal" kettle of 3 above the bobcat, following the player as
-  // they wander. Camera pitch clamps at +0.4 rad (~23° looking up), so the
-  // altitude/radius are tuned to fit in frame from the default 3rd-person
-  // view — sky-high vultures sit above the upper FOV cap.
-  for (let i = 0; i < 3; i++) {
-    mobs.spawnAt('vulture', spawn.x, spawn.y, spawn.z, {
-      phase: (i * 2 * Math.PI) / 3,
-      radius: 60 + i * 5,
-      altitude: 36 + i * 2,
-      followTarget: bobcat,
-      followLerp: 0.25
-    });
-  }
-  // Distant background kettles. 4 anchors at random bearings 700–2200m from
-  // spawn — close enough that the wing-span sprite still subtends a few
-  // pixels (5m sprite at 9km = sub-pixel, basically invisible), but far
-  // enough to read as "off in the distance" rather than another personal
-  // kettle. wingSpan is bumped to ~12m here for the same readability reason.
-  const kettleAnchors = [];
-  for (let k = 0; k < 4; k++) {
-    const bearing = (k / 4) * Math.PI * 2 + Math.random() * 0.6;
-    const dist = 700 + Math.random() * 1500;
-    const ax = spawn.x + Math.cos(bearing) * dist;
-    const az = spawn.z + Math.sin(bearing) * dist;
-    const ay = world.terrainQuery.sampleGroundY(ax, az);
-    kettleAnchors.push({ x: ax, y: ay, z: az });
-  }
-  for (const anchor of kettleAnchors) {
-    const birdCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
-    const kRadius = 60 + Math.random() * 40;
-    const kAltitude = 60 + Math.random() * 30;
-    for (let i = 0; i < birdCount; i++) {
-      mobs.spawnAt('vulture', anchor.x, anchor.y, anchor.z, {
-        phase: (i / birdCount) * Math.PI * 2 + Math.random() * 0.5,
-        radius: kRadius + i * 6,
-        altitude: kAltitude + i * 3,
-        angularSpeed: 0.10 + Math.random() * 0.06,
-        wingSpan: 12,
+  // Streaming kettles: 4 columns of 5-9 circling vultures held in a
+  // 450-1300m ring around the player and recycled as the player travels —
+  // always something turning on the horizon, never parked over your head.
+  // (Replaced the old fixed-anchor kettles, which got left behind within a
+  // minute of walking, and the personal follow-kettle that hid above the
+  // camera's pitch cap.)
+  const vultureKettles = createVultureKettles({
+    mobs,
+    player: bobcat,
+    groundY: (x, z) => world.terrainQuery.sampleGroundY(x, z),
+  });
+  // ---------- prey (deer herds) ----------
+  // Skinned PZ models from the same cobra-tools pipeline as the bobcat.
+  // Herds stream in a ring around the player: wander/graze when calm, flee
+  // when the bobcat charges, die + despawn when caught.
+  // (Goat was cut — the model variant looked off; its GLB/textures are still
+  // in public/assets/mobs if it ever comes back.)
+  // Blood reuses the dust particle system with droplet physics: small dense
+  // points that hold their size, fall hard, and carry momentum — a spray,
+  // not a puff.
+  const bloodDecals = createBloodDecals(scene, (x, z) => world.groundY(x, z));
+  const blood = createDust(scene, {
+    max: 5000,
+    color: 0x7d100c,
+    pxScale: 13,
+    alpha: 0.92,
+    grow: [0.55, 0.8],
+    gravity: 5.5,
+    drag: 1.3,
+  });
+
+  const onPreyKilled = mob => {
+    // Latch the bobcat onto the bite point: hold position just off the
+    // prey's neck, facing it, for as long as the collapse animation runs —
+    // reads as a bite instead of the cat sprinting through the corpse.
+    const bp = mob.bitePoint ? mob.bitePoint() : { x: mob.position.x, z: mob.position.z };
+    const dx = bobcat.position.x - bp.x;
+    const dz = bobcat.position.z - bp.z;
+    const d = Math.hypot(dx, dz) || 1;
+    const lx = bp.x + (dx / d) * 0.55;
+    const lz = bp.z + (dz / d) * 0.55;
+    const latchYaw = Math.atan2(bp.x - lx, bp.z - lz);
+    bobcat.startLatch(lx, lz, latchYaw, Math.min(2.0, (mob.deathDuration || 1.4) * 0.8));
+
+    // Blood: arterial jet away from the cat + a hanging mist at the wound,
+    // re-fired as weakening spurts through the hold. ~130 droplets per kill,
+    // well within the emitter's 600-particle ring buffer.
+    const ny = world.groundY(bp.x, bp.z) + 0.75;
+    const jx = -(dx / d), jz = -(dz / d);     // away from the cat
+    const spurt = strength => {
+      blood.spawn(bp.x, ny, bp.z, {
+        count: Math.round(220 * strength), size: 2.4, life: 0.65, speedT: 1.0,
+        jet: { x: jx * 2.8 * strength, z: jz * 2.8 * strength, y: 2.2 * strength },
       });
-    }
-  }
+      // Secondary fan in the cat's direction too — bites spray both ways.
+      blood.spawn(bp.x, ny + 0.1, bp.z, {
+        count: Math.round(70 * strength), size: 2.2, life: 0.5, speedT: 1.0,
+        jet: { x: -jx * 1.2 * strength, z: -jz * 1.2 * strength, y: 1.8 * strength },
+      });
+      blood.spawn(bp.x, ny - 0.15, bp.z, {
+        count: Math.round(110 * strength), size: 3.2, life: 0.95, speedT: 0.55,
+      });
+    };
+    spurt(1.0);
+    setTimeout(() => spurt(0.75), 150);
+    setTimeout(() => spurt(0.55), 320);
+    setTimeout(() => spurt(0.4), 520);
+    setTimeout(() => spurt(0.28), 760);
+
+    // Persistent splatter on the ground: one main pool under the bite, a
+    // thrown streak where the arterial jet lands.
+    bloodDecals.spawnAt(bp.x, bp.z, { size: 1.5 + Math.random() * 0.5 });
+    bloodDecals.spawnAt(bp.x + jx * (0.9 + Math.random() * 0.6),
+                        bp.z + jz * (0.9 + Math.random() * 0.6),
+                        { size: 0.7 + Math.random() * 0.4 });
+
+    audio.kill();
+    audio.eat();
+  };
+
+  const deerAsset = await loadPreyAsset({
+    url: asset('mobs/deer.glb'),
+    targetLength: 1.9,
+    textures: {
+      antler: asset('mobs/deer_textures/deer_white_tailed_male_antlers.palbinobasecolourandmasktexture_RGB.png'),
+      eye:    asset('mobs/deer_textures/deer_white_tailed_male_eyes.palbinobasecolourandmasktexture_RGB.png'),
+      hair:   asset('mobs/deer_textures/deer_white_tailed_male_hair.palbinobasecolourandmasktexture_RGB.png'),
+      fur:    asset('mobs/deer_textures/deer_white_tailed_male_fur.pbasecolourandmasktexture_RGB.png'),
+      skin:   asset('mobs/deer_textures/deer_white_tailed_male_fur.pbasecolourandmasktexture_RGB.png'),
+    },
+  });
+  const groundYFn = (x, z) => world.groundY(x, z);
+  mobs.registerType('deer', createPreyType(deerAsset, groundYFn, {
+    walkSpeed: 1.4, runSpeed: 11.0,
+    // Walk to within ~11m undetected, then sprint the pounce; a full-speed
+    // approach gives you away at ~44m. Bumped runSpeed so a straight chase
+    // is a real commitment — stealth is the reliable route.
+    stealthRadius: 11, alertRadius: 44, panicRadius: 7,
+    calmRadius: 65, catchRadius: 1.4,
+    onKilled: onPreyKilled,
+  }));
+  const preyHerds = createPreyHerds({
+    mobs,
+    groundY: groundYFn,
+    player: bobcat,
+    dem: world.dem,
+    herdSpecs: [
+      { typeId: 'deer', weight: 1, count: [3, 5] },
+    ],
+    opts: { maxHerds: 3, spawnMin: 200, spawnMax: 360, despawnRadius: 550 },
+  });
+
   if (typeof window !== 'undefined') {
     window.__mobs = mobs;
+    window.__preyHerds = preyHerds;
     window.__cam = cam;
     window.__water = world.water;
     window.__bobcat = bobcat;
@@ -201,6 +278,7 @@ async function main() {
   // current renderer size.
   nightVision = createNightVision(renderer);
   nightVision.resize(renderer.domElement.width, renderer.domElement.height);
+  let environment = null;
 
   // ---------- debug menu ----------
   // Toggle with ` (backtick) or F1. First panel is "Filters" — saturation,
@@ -610,6 +688,249 @@ async function main() {
         }
       },
       {
+        id: 'foliage', label: 'Foliage',
+        render(el) {
+          const u = world.terrain.uniforms;
+          const field = world.foliageField;
+          const mass = world.foliageMass;
+          const palette = () => environment?.state?.foliagePalette;
+          const colorHex = color => `#${color.getHexString()}`;
+          const syncPalette = () => {
+            const p = palette();
+            if (!p) return;
+            u.uGrassRootColor.value.copy(p.grassRootColor);
+            u.uGrassTipColor.value.copy(p.grassTipColor);
+            u.uWoodyUnderstoryColor.value.copy(p.woodyUnderstoryColor);
+            u.uWoodyCanopyColor.value.copy(p.woodyCanopyColor);
+            u.uFoliageValueScale.value = p.foliageValueScale;
+            u.uFoliageStrength.value = p.foliageStrength;
+            for (const tier of world.plants.tiers) {
+              tier.uniforms.uPlantHueColor.value.copy(p.plantHueColor);
+              tier.uniforms.uPlantHueStrength.value = p.plantHueStrength;
+              tier.uniforms.uPlantSaturation.value = p.plantSaturation;
+              tier.uniforms.uPlantValueScale.value = p.foliageValueScale;
+            }
+            if (mass) mass.setPalette(p);
+          };
+
+          const seasonButton = id => panelButton(el, `Season: ${id}`, () => {
+            if (!environment) return;
+            environment.setSeason(id);
+            el.parentElement.querySelector('.dbg-tab.active').click();
+          });
+          seasonButton('summer_dry');
+          seasonButton('late_spring');
+          seasonButton('monsoon');
+          seasonButton('winter_dormant');
+
+          const foliageMode = () => u.uHasFoliageMass.value > 0.5 ? 'ON' : 'OFF';
+          const foliageBtn = panelButton(el, `Terrain foliage: ${foliageMode()}`, () => {
+            u.uHasFoliageMass.value = u.uHasFoliageMass.value > 0.5 ? 0.0 : 1.0;
+            foliageBtn.textContent = `Terrain foliage: ${foliageMode()}`;
+          });
+          const debugMode = () => u.uDebugFoliageMass.value > 0.5 ? 'ON' : 'OFF';
+          const debugBtn = panelButton(el, `Debug mass RGB: ${debugMode()}`, () => {
+            u.uDebugFoliageMass.value = u.uDebugFoliageMass.value > 0.5 ? 0.0 : 1.0;
+            debugBtn.textContent = `Debug mass RGB: ${debugMode()}`;
+          });
+          if (mass) {
+            const massMode = () => mass.group.visible ? 'ON' : 'OFF';
+            const massBtn = panelButton(el, `Mass impostors: ${massMode()}`, () => {
+              mass.setEnabled(!mass.group.visible);
+              massBtn.textContent = `Mass impostors: ${massMode()}`;
+            });
+          }
+
+          // Near-camera dissolve. End must stay above the camera's 0.5m near
+          // plane or plants get sliced open before they finish fading.
+          const plantU = (name, v) => {
+            for (const tier of world.plants.tiers) tier.uniforms[name].value = v;
+          };
+          for (const [label, name, min, max] of [
+            ['Near fade start', 'uNearFadeStart', 1.0, 14],
+            ['Near fade end', 'uNearFadeEnd', 0.5, 2],
+            ['Near fade curve', 'uNearFadeCurve', 0.1, 2],
+            ['Near blur', 'uNearBlur', 0, 5]
+          ]) {
+            panelRow(el, {
+              label, min, max, step: 0.05,
+              value: world.plants.tiers[0].uniforms[name].value,
+              format: v => name.includes('Fade') && !name.includes('Curve') ? `${v.toFixed(2)}m` : v.toFixed(2),
+              onInput: v => plantU(name, v)
+            });
+          }
+
+          // Character lighting: 1 = world model (matches terrain), 0 = three's
+          // PBR pipeline, for A/B against how it looked before.
+          if (bobcat?.lightingUniforms) {
+            panelRow(el, {
+              label: 'Cat world-lit', min: 0, max: 1, step: 0.01,
+              value: bobcat.lightingUniforms.uWorldLightMix.value,
+              onInput: v => { bobcat.lightingUniforms.uWorldLightMix.value = v; }
+            });
+          }
+
+          // Ground grade — the sampled limestone/soil palette. 0 shows the
+          // raw splat textures for comparison.
+          panelRow(el, {
+            label: 'Ground grade', min: 0, max: 1, step: 0.01,
+            value: u.uGroundGrade.value,
+            onInput: v => u.uGroundGrade.value = v
+          });
+          for (const [label, name] of [
+            ['Rock dark', 'uGroundRockDark'], ['Rock lit', 'uGroundRockLit'],
+            ['Soil dark', 'uGroundSoilDark'], ['Soil lit', 'uGroundSoilLit']
+          ]) {
+            panelColor(el, {
+              label, value: colorHex(u[name].value),
+              onInput: v => u[name].value.set(v)
+            });
+          }
+
+          // Canopy-normal shading (see species.js CANOPY). Strength 0 is the
+          // old per-card flat lighting, for A/B-ing the effect in place.
+          const plantUniform = (name, v) => {
+            for (const tier of world.plants.tiers) tier.uniforms[name].value = v;
+          };
+          const canopyDial = (label, name, max) => panelRow(el, {
+            label, min: 0, max, step: 0.01,
+            value: world.plants.tiers[0].uniforms[name].value,
+            onInput: v => plantUniform(name, v)
+          });
+          canopyDial('Canopy normals', 'uCanopyStrength', 1);
+          canopyDial('Canopy wrap', 'uCanopyWrap', 1);
+          canopyDial('Canopy contrast', 'uCanopyContrast', 4);
+          canopyDial('Canopy backlight', 'uCanopyTrans', 2);
+
+          panelRow(el, {
+            label: 'Terrain strength', min: 0, max: 2, step: 0.01,
+            value: palette()?.foliageStrength ?? u.uFoliageStrength.value,
+            onInput: v => {
+              const p = palette();
+              if (p) {
+                p.foliageStrength = v;
+                syncPalette();
+              } else {
+                u.uFoliageStrength.value = v;
+              }
+            }
+          });
+          const blendName = v => ['HUE', 'MULT', 'OVER', 'DARK'][Math.max(0, Math.min(3, Math.round(v)))] || 'HUE';
+          panelRow(el, {
+            label: 'Grass blend', min: 0, max: 3, step: 1,
+            value: u.uGrassBlendMode.value,
+            format: blendName,
+            onInput: v => u.uGrassBlendMode.value = v
+          });
+          panelRow(el, {
+            label: 'Woody blend', min: 0, max: 3, step: 1,
+            value: u.uWoodyBlendMode.value,
+            format: blendName,
+            onInput: v => u.uWoodyBlendMode.value = v
+          });
+          panelRow(el, {
+            label: 'Woody darken', min: 0, max: 0.8, step: 0.01,
+            value: u.uWoodyDarken.value,
+            onInput: v => u.uWoodyDarken.value = v
+          });
+          const p = palette();
+          if (p) {
+            panelColor(el, {
+              label: 'Grass root', value: colorHex(p.grassRootColor),
+              onInput: v => { p.grassRootColor.set(v); syncPalette(); }
+            });
+            panelColor(el, {
+              label: 'Grass tip', value: colorHex(p.grassTipColor),
+              onInput: v => { p.grassTipColor.set(v); syncPalette(); }
+            });
+            panelColor(el, {
+              label: 'Woody under', value: colorHex(p.woodyUnderstoryColor),
+              onInput: v => { p.woodyUnderstoryColor.set(v); syncPalette(); }
+            });
+            panelColor(el, {
+              label: 'Woody canopy', value: colorHex(p.woodyCanopyColor),
+              onInput: v => { p.woodyCanopyColor.set(v); syncPalette(); }
+            });
+            panelColor(el, {
+              label: 'Plant hue', value: colorHex(p.plantHueColor),
+              onInput: v => { p.plantHueColor.set(v); syncPalette(); }
+            });
+            panelRow(el, {
+              label: 'Plant hue mix', min: 0, max: 1, step: 0.01,
+              value: p.plantHueStrength,
+              onInput: v => { p.plantHueStrength = v; syncPalette(); }
+            });
+            panelRow(el, {
+              label: 'Plant saturation', min: 0, max: 1.8, step: 0.01,
+              value: p.plantSaturation,
+              onInput: v => { p.plantSaturation = v; syncPalette(); }
+            });
+            panelRow(el, {
+              label: 'Foliage value', min: 0.4, max: 1.6, step: 0.01,
+              value: p.foliageValueScale,
+              onInput: v => { p.foliageValueScale = v; syncPalette(); }
+            });
+          }
+
+          if (field) {
+            const fp = field.params;
+            const fieldSlider = (label, key, min, max, step) => panelRow(el, {
+              label, min, max, step, value: fp[key],
+              onInput: v => fp[key] = v
+            });
+            fieldSlider('Grass density', 'grassScale', 0, 3, 0.01);
+            fieldSlider('Grass open flats', 'grassOpenScale', 0, 2, 0.01);
+            fieldSlider('Grass patch floor', 'grassPatchFloor', 0, 1, 0.01);
+            fieldSlider('Grass drain cut', 'grassDrainageSuppress', 0, 1, 0.01);
+            fieldSlider('Woody density', 'woodyScale', 0, 3, 0.01);
+            fieldSlider('Drainage power', 'drainagePower', 0.2, 3, 0.01);
+            fieldSlider('Slope cutoff', 'slopeCutoff', 0.05, 0.8, 0.01);
+            fieldSlider('Edge strength', 'edgeStrength', 0, 4, 0.01);
+            panelButton(el, 'Regenerate field', () => {
+              field.regenerate();
+              if (mass?.reloadChunks) mass.reloadChunks();
+            });
+            panelButton(el, 'Grassier field', () => {
+              field.regenerate({
+                grassScale: 2.25,
+                grassNoiseFreq: 6.0,
+                grassOpenScale: 1.15,
+                grassPatchFloor: 0.58,
+                grassDrainageSuppress: 0.18,
+                slopeCutoff: 0.56
+              });
+              if (mass?.reloadChunks) mass.reloadChunks();
+              el.parentElement.querySelector('.dbg-tab.active').click();
+            });
+          }
+
+          if (mass) {
+            const s = mass.settings;
+            panelRow(el, {
+              label: 'Mass active radius', min: 512, max: 5000, step: 64,
+              value: s.activeRadius,
+              onInput: v => s.activeRadius = v
+            });
+            panelRow(el, {
+              label: 'Mass unload radius', min: 768, max: 6000, step: 64,
+              value: s.unloadRadius,
+              onInput: v => s.unloadRadius = v
+            });
+            panelRow(el, {
+              label: 'Chunks / frame', min: 1, max: 8, step: 1,
+              value: s.maxGeneratedPerFrame,
+              onInput: v => s.maxGeneratedPerFrame = v
+            });
+            panelRow(el, {
+              label: 'Impostors / chunk', min: 16, max: 512, step: 8,
+              value: s.maxImpostorsPerChunk,
+              onInput: v => s.maxImpostorsPerChunk = v
+            });
+            panelButton(el, 'Reload mass chunks', () => mass.reloadChunks());
+          }
+        }
+      },
+      {
         id: 'animation', label: 'Animation',
         render(el) {
           panelRow(el, {
@@ -746,19 +1067,23 @@ async function main() {
   // Daylight fill for the bobcat. Terrain/plants are shader-lit separately;
   // this small local source keeps the animal readable when the sun is high or
   // behind the camera-facing side without washing out the whole desert.
-  const bobcatFill = new THREE.PointLight(0xfff7ea, 0, 4.2, 1.45);
+  // Wider range + near-linear decay (1.0) so the fill covers the whole body
+  // evenly instead of a hot spot near the lamp — the cat is ~0.85m long and
+  // the lamp hovers ~1m off it, so a steep falloff left the far flank dark.
+  const bobcatFill = new THREE.PointLight(0xfff7ea, 0, 8.0, 1.0);
   bobcatFill.castShadow = false;
   bobcatFill.layers.set(BOBCAT_LIGHT_LAYER);
   scene.add(bobcatFill);
-  const bobcatTopFill = new THREE.PointLight(0xddeeff, 0, 4.8, 1.35);
+  const bobcatTopFill = new THREE.PointLight(0xddeeff, 0, 8.0, 1.0);
   bobcatTopFill.castShadow = false;
   bobcatTopFill.layers.set(BOBCAT_LIGHT_LAYER);
   scene.add(bobcatTopFill);
 
-  const environment = createEnvironment({
+  environment = createEnvironment({
     renderer, sky, world,
-    sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill
+    sun, hemi, ambient, lantern, bobcatFill, bobcatTopFill, bobcat
   });
+  if (typeof window !== 'undefined') window.__setSeason = id => environment.setSeason(id);
   environment.update(0);
 
   const audio = createAudio();
@@ -810,7 +1135,11 @@ async function main() {
     bobcat.update(dt, inputs, world.dem);
     cam.update(dt);
     dust.update(dt);
-    mobs.update(dt, t);
+    blood.update(dt);
+    bloodDecals.update(dt);
+    mobs.update(dt, t, { bobcat });
+    preyHerds.update(dt);
+    vultureKettles.update(dt);
 
     // Keep the sky sphere centred on the camera so its direction-based shading
     // doesn't drift when the player walks far from origin.
@@ -890,7 +1219,7 @@ async function main() {
     const prompt = bobcat.isDrinking ? 'DRINKING'
                  : bobcat.canDrink   ? 'DRINK (E)'
                  : null;
-    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps, prompt });
+    hud.update({ playerYaw: bobcat.yaw, playerPos: bobcat.position, fps: displayFps, prompt, prey: mobs.mobs });
     if (typeof window !== 'undefined') {
       window.__bobcatPos = {
         bobcat: { x: bobcat.position.x, y: bobcat.position.y, z: bobcat.position.z, yaw: bobcat.yaw },

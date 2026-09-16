@@ -1,3 +1,4 @@
+import { asset } from '../assetPath.js';
 import * as THREE from 'three';
 
 import { loadDEM, heightmapTexture } from '../terrain/DEMLoader.js';
@@ -10,6 +11,8 @@ import { generateDetailNoise } from '../terrain/DetailNoise.js';
 
 import { buildSpriteAtlas } from '../vegetation/SpriteAtlas.js';
 import { createInstancedPlants } from '../vegetation/InstancedPlants.js';
+import { generateFoliageField } from '../vegetation/FoliageField.js';
+import { createFoliageMassField } from '../vegetation/FoliageMassField.js';
 import { SPECIES } from '../vegetation/species.js';
 
 import { findWaterPools } from './WaterAnalysis.js';
@@ -50,6 +53,8 @@ export class World {
     this.detailPatches = [];
     this.water = null;
     this.plants = null;
+    this.foliageField = null;
+    this.foliageMass = null;
     this.shadows = null;
     this.terrainSegments = 1280;
     // Padding ring around the DEM. Camera far plane is 25km, so any cat
@@ -61,7 +66,7 @@ export class World {
 
   async init() {
     this._onProgress(0.05, 'Loading terrain…');
-    this.dem = await loadDEM('/assets/dem/terrarium.png', '/assets/dem/terrarium.json',
+    this.dem = await loadDEM(asset('dem/terrarium.png'), asset('dem/terrarium.json'),
       t => this._onProgress(0.05 + t * 0.30, 'Loading terrain…'));
     console.log(
       `DEM ${this.dem.width}x${this.dem.height}, ` +
@@ -89,6 +94,12 @@ export class World {
     const heightTex = heightmapTexture(THREE, this.dem);
     const splatPair = generateSplatMap(this.dem, 1280);
     this.splat = splatPair;
+    this.foliageField = generateFoliageField({ dem: this.dem, splat: splatPair, resolution: 1280 });
+    const regenerateSplat = splatPair.regenerate;
+    splatPair.regenerate = patch => {
+      regenerateSplat(patch);
+      this.foliageField.regenerate();
+    };
     const ground = await loadGroundTextures(this.renderer);
 
     this.detailNoise = generateDetailNoise({
@@ -109,6 +120,7 @@ export class World {
       groundDetail: ground.groundDetail,
       normalTex: ground.defaultNormal,
       detailNoise: this.detailNoise,
+      foliageField: this.foliageField,
       segments: this.terrainSegments,
       edgePadding: this.terrainEdgePadding,
     });
@@ -160,9 +172,17 @@ export class World {
       atlas,
       dem: this.dem,
       groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z),
-      shadows: this.shadows
+      shadows: this.shadows,
+      foliageField: this.foliageField
     });
     for (const tier of this.plants.tiers) this.scene.add(tier.mesh);
+    this.foliageMass = createFoliageMassField({
+      scene: this.scene,
+      atlas,
+      field: this.foliageField,
+      dem: this.dem,
+      groundY: (x, z) => this.terrainQuery.sampleGroundY(x, z)
+    });
     console.log('vegetation streaming enabled');
   }
 
@@ -187,6 +207,7 @@ export class World {
    */
   update(dt, t, ctx) {
     this.plants.update(t, ctx.cameraPosition, ctx.camera);
+    if (this.foliageMass) this.foliageMass.update(t, ctx.cameraPosition, ctx.camera);
     if (this.shadows) this.shadows.updatePlants(ctx.cameraPosition, ctx.camera, ctx.environment);
     this.water.update(dt, t, ctx);
   }

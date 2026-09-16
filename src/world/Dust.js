@@ -13,7 +13,24 @@ import * as THREE from 'three';
  * MAX is generous). Particles render with depthWrite off so multiple puffs
  * blend without z-fighting against each other.
  */
-export function createDust(scene, { max = 320 } = {}) {
+/**
+ * Options beyond `max`/`color` exist for non-dust uses (blood spray):
+ *   pxScale  — point-size multiplier; smaller = finer particles
+ *   alpha    — peak particle opacity
+ *   grow     — [startScale, endScale] over lifetime; dust grows (puffs),
+ *              droplets should stay tight or shrink
+ *   gravity  — downward accel; droplets fall hard, dust floats
+ *   drag     — velocity damping rate; low drag = particles carry further
+ */
+export function createDust(scene, {
+  max = 320,
+  color = 0xc4ad84,
+  pxScale = 32.0,
+  alpha = 0.55,
+  grow = [0.6, 1.6],
+  gravity = 0.9,
+  drag = 2.4,
+} = {}) {
   const positions = new Float32Array(max * 3);
   const velocities = new Float32Array(max * 3);
   const ages = new Float32Array(max);
@@ -41,14 +58,17 @@ export function createDust(scene, { max = 320 } = {}) {
       // gl_PointSize = aSize * scale * (uPxScale / -mv.z). With aSize ≈ 5..12
       // and a 3rd-person camera ~4m back, this gives ~25..70px particles —
       // roughly the apparent size of a 0.1m dust puff at that distance.
-      uPxScale: { value: 32.0 },
-      uColor: { value: new THREE.Color(0xc4ad84) }   // tan desert dust
+      uPxScale: { value: pxScale },
+      uColor: { value: new THREE.Color(color) },     // default: tan desert dust
+      uAlpha: { value: alpha },
+      uGrow: { value: new THREE.Vector2(grow[0], grow[1]) }
     },
     vertexShader: /* glsl */`
       attribute float aSize;
       attribute float aAge;
       attribute float aLife;
       uniform float uPxScale;
+      uniform vec2 uGrow;
       varying float vT;
       void main() {
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
@@ -62,7 +82,7 @@ export function createDust(scene, { max = 320 } = {}) {
           return;
         }
         // Grow with age, perspective-correct size in pixels.
-        float scale = mix(0.6, 1.6, vT);
+        float scale = mix(uGrow.x, uGrow.y, vT);
         gl_PointSize = aSize * scale * (uPxScale / -mv.z);
         gl_Position = projectionMatrix * mv;
       }
@@ -70,6 +90,7 @@ export function createDust(scene, { max = 320 } = {}) {
     fragmentShader: /* glsl */`
       precision mediump float;
       uniform vec3 uColor;
+      uniform float uAlpha;
       varying float vT;
       void main() {
         vec2 c = gl_PointCoord - 0.5;
@@ -79,7 +100,7 @@ export function createDust(scene, { max = 320 } = {}) {
         // Fade in fast (0.0..0.1), out slowly (0.4..1.0).
         float fadeIn = smoothstep(0.0, 0.10, vT);
         float fadeOut = 1.0 - smoothstep(0.45, 1.0, vT);
-        float a = disc * fadeIn * fadeOut * 0.55;
+        float a = disc * fadeIn * fadeOut * uAlpha;
         gl_FragColor = vec4(uColor, a);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -123,13 +144,22 @@ export function createDust(scene, { max = 320 } = {}) {
       const horiz = (0.5 + Math.random() * 0.9) * (0.6 + speedT * 1.6);
       let vx = Math.cos(angle) * horiz;
       let vz = Math.sin(angle) * horiz;
+      let vy = 0.4 + Math.random() * 0.7;
       if (opts.dir) {
         // Bias outward kick along the *backward* direction (opposite motion),
         // so dust trails behind a running cat.
         vx -= opts.dir.x * (0.8 + speedT * 1.6);
         vz -= opts.dir.z * (0.8 + speedT * 1.6);
       }
-      const vy = 0.4 + Math.random() * 0.7;
+      if (opts.jet) {
+        // Directional jet (blood spray): velocity dominated by the jet vector
+        // with a tight random cone around it and a strong upward arc, instead
+        // of the omnidirectional puff.
+        const j = 0.6 + Math.random() * 0.9;
+        vx = opts.jet.x * j + (Math.random() - 0.5) * 0.8;
+        vz = opts.jet.z * j + (Math.random() - 0.5) * 0.8;
+        vy = (opts.jet.y ?? 1.6) * (0.5 + Math.random() * 0.9);
+      }
       const px = x + (Math.random() - 0.5) * 0.18;
       const py = y + 0.04 + Math.random() * 0.06;
       const pz = z + (Math.random() - 0.5) * 0.18;
@@ -153,10 +183,10 @@ export function createDust(scene, { max = 320 } = {}) {
       positions[i * 3 + 0] += velocities[i * 3 + 0] * dt;
       positions[i * 3 + 1] += velocities[i * 3 + 1] * dt;
       positions[i * 3 + 2] += velocities[i * 3 + 2] * dt;
-      const drag = Math.exp(-2.4 * dt);
-      velocities[i * 3 + 0] *= drag;
-      velocities[i * 3 + 2] *= drag;
-      velocities[i * 3 + 1] = velocities[i * 3 + 1] * drag - 0.9 * dt;
+      const dragK = Math.exp(-drag * dt);
+      velocities[i * 3 + 0] *= dragK;
+      velocities[i * 3 + 2] *= dragK;
+      velocities[i * 3 + 1] = velocities[i * 3 + 1] * dragK - gravity * dt;
       any = true;
     }
     if (any) {

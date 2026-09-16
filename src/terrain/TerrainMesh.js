@@ -7,7 +7,7 @@ import * as THREE from 'three';
  * Vertex grid is fixed (segments x segments); the heightmap texture is sampled in
  * the vertex shader. Splatmap blends four ground textures in the fragment shader.
  */
-export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, normalAtlas = null, groundDetail = null, normalTex, detailNoise = null, segments = 512, edgePadding = 8000 }) {
+export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, normalAtlas = null, groundDetail = null, normalTex, detailNoise = null, foliageField = null, segments = 512, edgePadding = 8000 }) {
   const planeWidth = dem.worldWidth + edgePadding * 2;
   const planeHeight = dem.worldHeight + edgePadding * 2;
   const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight, segments, segments);
@@ -20,6 +20,31 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uSplat:  { value: splatA },
     uSplatB: { value: splatB || splatA }, // fallback so sampler always binds
     uHasSplatB: { value: splatB ? 1.0 : 0.0 },
+    uFoliageMass: { value: foliageField ? foliageField.texture : splatA },
+    uHasFoliageMass: { value: foliageField ? 1.0 : 0.0 },
+    uFoliageStrength: { value: 0.0 },
+    // Ground grade — sampled off a photo from this region (Val Verde
+    // limestone country). The splat textures carry the luminance detail we
+    // want to keep; what was wrong was the chroma, which ran warmer and more
+    // saturated than the real ground. So the grade preserves each pixel's own
+    // luminance and only pulls its colour toward these, split into the two
+    // families the samples actually fall into: cool grey limestone/caliche
+    // and warm tan soil. Which family a pixel gets comes from the splat
+    // weights, so rock reads cool and sand reads warm instead of everything
+    // sliding to one average tint.
+    uGroundRockDark: { value: new THREE.Color('#767678') },
+    uGroundRockLit:  { value: new THREE.Color('#97979c') },
+    uGroundSoilDark: { value: new THREE.Color('#928575') },
+    uGroundSoilLit:  { value: new THREE.Color('#a09580') },
+    uGroundGrade:    { value: 0.75 },   // 0 = raw textures, 1 = fully graded
+    uGrassRootColor: { value: new THREE.Color('#7b6f3b') },
+    uGrassTipColor: { value: new THREE.Color('#c2ae69') },
+    uWoodyUnderstoryColor: { value: new THREE.Color('#656d54') },
+    uWoodyCanopyColor: { value: new THREE.Color('#656d54') },
+    uFoliageValueScale: { value: 1.0 },
+    uGrassBlendMode: { value: 0.0 },
+    uWoodyBlendMode: { value: 3.0 },
+    uWoodyDarken: { value: 0.68 },
     uTexRock:   { value: groundTextures.rock },
     uTexGrass:  { value: groundTextures.grass },
     uTexGravel: { value: groundTextures.gravel },
@@ -74,6 +99,7 @@ export function createTerrainMesh({ dem, heightTex, splatTex, groundTextures, no
     uDebugTextureContrast: { value: 1.0 },
     uDebugFarBlend: { value: 1.0 },
     uDebugPatchDither: { value: 0.0 },
+    uDebugFoliageMass: { value: 0.0 },
     uLanternPos:   { value: new THREE.Vector3() },
     uLanternColor: { value: new THREE.Color('#b8d2ff') },  // cool moonlight
     uLanternRange: { value: 22.0 },
@@ -347,6 +373,22 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform sampler2D uSplatB;
   uniform float uHasSplatB;
   uniform float uSplatBias;
+  uniform sampler2D uFoliageMass;
+  uniform float uHasFoliageMass;
+  uniform float uFoliageStrength;
+  uniform vec3 uGroundRockDark;
+  uniform vec3 uGroundRockLit;
+  uniform vec3 uGroundSoilDark;
+  uniform vec3 uGroundSoilLit;
+  uniform float uGroundGrade;
+  uniform vec3 uGrassRootColor;
+  uniform vec3 uGrassTipColor;
+  uniform vec3 uWoodyUnderstoryColor;
+  uniform vec3 uWoodyCanopyColor;
+  uniform float uFoliageValueScale;
+  uniform float uGrassBlendMode;
+  uniform float uWoodyBlendMode;
+  uniform float uWoodyDarken;
   uniform sampler2D uTexRock;
   uniform sampler2D uTexGrass;
   uniform sampler2D uTexGravel;
@@ -385,6 +427,7 @@ export const TERRAIN_FRAG = /* glsl */`
   uniform float uDebugTextureContrast;
   uniform float uDebugFarBlend;
   uniform float uDebugPatchDither;
+  uniform float uDebugFoliageMass;
   uniform vec3 uLanternPos;
   uniform vec3 uLanternColor;
   uniform float uLanternRange;
@@ -401,6 +444,29 @@ export const TERRAIN_FRAG = /* glsl */`
 
   float ditherHash(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
+  vec3 preserveLumMix(vec3 base, vec3 target, float amount, float valueScale) {
+    float baseLum = max(dot(base, vec3(0.299, 0.587, 0.114)), 0.001);
+    float targetLum = max(dot(target, vec3(0.299, 0.587, 0.114)), 0.001);
+    vec3 matched = target * (baseLum / targetLum) * valueScale;
+    return mix(base, matched, clamp(amount, 0.0, 1.0));
+  }
+
+  vec3 foliageBlend(vec3 base, vec3 target, float amount, float valueScale, float mode, float darken) {
+    float baseLum = max(dot(base, vec3(0.299, 0.587, 0.114)), 0.001);
+    float targetLum = max(dot(target, vec3(0.299, 0.587, 0.114)), 0.001);
+    vec3 lumMatched = target * (baseLum / targetLum) * valueScale;
+    vec3 multiplyCol = base * mix(vec3(1.0), target * 1.55, 0.78) * valueScale;
+    vec3 overlayTarget = clamp(target * (0.68 / targetLum), 0.0, 1.6);
+    vec3 overlayCol = mix(2.0 * base * overlayTarget, 1.0 - 2.0 * (1.0 - base) * (1.0 - overlayTarget), step(0.5, base));
+    overlayCol = mix(overlayCol, overlayCol * (1.0 - darken), clamp(amount, 0.0, 1.0));
+    vec3 darkenCol = min(base, lumMatched) * (1.0 - darken);
+    vec3 blended = lumMatched;
+    blended = mix(blended, multiplyCol, step(0.5, mode));
+    blended = mix(blended, overlayCol, step(1.5, mode));
+    blended = mix(blended, darkenCol, step(2.5, mode));
+    return mix(base, blended, clamp(amount, 0.0, 1.0));
   }
 
   void main() {
@@ -496,6 +562,48 @@ export const TERRAIN_FRAG = /* glsl */`
              + vec3(0.32, 0.27, 0.20) * splatB.r
              + vec3(0.24, 0.22, 0.19) * splatB.g
              + vec3(0.50, 0.43, 0.31) * splatB.b;
+    }
+
+    if (uGroundGrade > 0.001) {
+      // Rock-family vs soil-family weight, straight off the splat.
+      float rocky = splat.r + splatB.g;
+      float soily = splat.g + splat.b + splat.a + splatB.r + splatB.b;
+      float coolT = rocky / max(rocky + soily, 1e-3);
+      float lum = dot(albedo, vec3(0.299, 0.587, 0.114));
+      float shade = smoothstep(0.16, 0.56, lum);
+      vec3 target = mix(
+        mix(uGroundSoilDark, uGroundSoilLit, shade),
+        mix(uGroundRockDark, uGroundRockLit, shade),
+        coolT);
+      // Renormalise the target to this pixel's own luminance, so the grade
+      // moves hue and saturation only and every bit of texture detail and
+      // lighting variation in the albedo survives intact.
+      target *= lum / max(dot(target, vec3(0.299, 0.587, 0.114)), 1e-3);
+      albedo = mix(albedo, target, uGroundGrade);
+    }
+
+    if (uHasFoliageMass > 0.5) {
+      vec4 foliage = texture2D(uFoliageMass, vDemUv);
+      float grassMass = foliage.r;
+      float woodyMass = foliage.g;
+      float edgeMask = foliage.b;
+      float canopy = foliage.a;
+      if (uDebugFoliageMass > 0.5) {
+        gl_FragColor = vec4(grassMass, woodyMass, edgeMask, 1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+        return;
+      }
+      float farFoliage = smoothstep(70.0, 220.0, distView) * uFoliageStrength;
+      float viewGrazing = pow(clamp(1.0 - abs(normalize(cameraPosition - vWorldPos).y), 0.0, 1.0), 2.0);
+      vec3 grassCol = mix(uGrassRootColor, uGrassTipColor, clamp(0.38 + grassMass * 0.44 + viewGrazing * 0.22, 0.0, 1.0));
+      vec3 woodyCol = mix(uWoodyUnderstoryColor, uWoodyCanopyColor, clamp(canopy * 0.82 + edgeMask * 0.18, 0.0, 1.0));
+      float grassAmt = clamp(grassMass * (0.34 + viewGrazing * 0.28), 0.0, 0.82);
+      float woodyAmt = clamp(woodyMass * (0.46 + canopy * 0.30 + edgeMask * 0.18), 0.0, 0.9);
+      vec3 foliageCol = foliageBlend(albedo, grassCol, grassAmt, uFoliageValueScale, uGrassBlendMode, 0.0);
+      foliageCol = foliageBlend(foliageCol, woodyCol, woodyAmt, uFoliageValueScale, uWoodyBlendMode, uWoodyDarken);
+      float totalMass = clamp(grassMass * 0.70 + woodyMass * 0.92 + edgeMask * 0.22, 0.0, 1.0);
+      albedo = mix(albedo, foliageCol, farFoliage * totalMass);
     }
 
     // Close-range detail: one grayscale tile, sampled at world-space coords.
